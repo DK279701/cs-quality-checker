@@ -1,65 +1,62 @@
 import streamlit as st
-import openai
 import pandas as pd
 import datetime
+from transformers import pipeline
 
-from openai import OpenAI
+# Ustawienia aplikacji
+st.set_page_config(page_title="Sprawdzanie jakości CS (HuggingFace)", layout="centered")
+st.title("🧠 Lokalna analiza wiadomości Customer Service (darmowe API HuggingFace)")
+st.markdown("Wklej bazę wiedzy i wiadomość agenta – sprawdzimy jej jakość z wykorzystaniem darmowego modelu HuggingFace.")
 
-st.set_page_config(page_title="Sprawdzanie jakości CS", layout="centered")
+# Wprowadź swój token API z HuggingFace
+hf_api_key = st.text_input("🔐 Twój token API HuggingFace", type="password")
 
-st.title("🕵️‍♂️ Sprawdzanie jakości wiadomości - Customer Service")
-st.markdown("Wklej wiadomość agenta oraz bazę wiedzy, a sprawdzimy, czy wiadomość jest zgodna z procedurami.")
-
-api_key = st.text_input("🔐 Twój klucz OpenAI API", type="password")
-if not api_key:
-    st.warning("Aby korzystać z aplikacji, wklej swój klucz OpenAI API powyżej.")
+if not hf_api_key:
+    st.warning("Aby korzystać z aplikacji, wklej swój token API HuggingFace.")
     st.stop()
 
-client = OpenAI(api_key=api_key)
+# Inicjalizujemy model NLP (GPT-2) z HuggingFace
+model_name = "distilgpt2"  # Możesz spróbować innych modeli np. GPT-2, GPT-Neo
+generator = pipeline("text-generation", model=model_name, tokenizer=model_name, use_auth_token=hf_api_key)
 
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-knowledge_base = st.text_area("📘 Wklej bazę wiedzy (możesz skopiować z Google Sites)", height=200)
-message = st.text_area("💬 Wklej wiadomość agenta", height=200)
+# Zapytania od użytkownika
+knowledge_base = st.text_area("📘 Baza wiedzy (skopiowana z Google Sites)", height=200)
+message = st.text_area("💬 Wiadomość agenta", height=200)
 
 if st.button("🔍 Sprawdź wiadomość"):
     if not knowledge_base.strip() or not message.strip():
-        st.error("Uzupełnij zarówno bazę wiedzy, jak i wiadomość agenta.")
+        st.warning("Wprowadź zarówno bazę wiedzy, jak i wiadomość agenta.")
     else:
-        with st.spinner("Analizuję wiadomość..."):
+        with st.spinner("Analiza lokalna..."):
             prompt = (
                 "Jesteś ekspertem ds. jakości w obsłudze klienta. "
-                "Na podstawie poniższej bazy wiedzy sprawdź, czy wiadomość agenta jest zgodna z procedurami. "
-                "Jeśli nie, wskaż, co należy poprawić. Oceń także ogólną jakość wiadomości (ton, kompletność, profesjonalizm).\n\n"
+                "Sprawdź poniższą wiadomość agenta pod kątem zgodności z procedurami opisanymi w bazie wiedzy. "
+                "Zwróć uwagę na ton, profesjonalizm i kompletność odpowiedzi. "
+                "Odpowiedz po polsku.\n\n"
                 f"### Baza wiedzy:\n{knowledge_base}\n\n"
                 f"### Wiadomość agenta:\n{message}\n\n"
-                "Odpowiedz w języku polskim."
             )
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                )
-                result = response.choices[0].message.content
-                st.success("✅ Analiza zakończona:")
-                st.markdown(result)
 
-                st.session_state.history.append({
-                    "data": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "wiadomość": message,
-                    "ocena": result
-                })
+            response = generator(prompt, max_length=512, num_return_sequences=1)[0]["generated_text"]
 
-            except Exception as e:
-                st.error(f"Błąd podczas zapytania do OpenAI: {e}")
+            st.success("✅ Analiza zakończona:")
+            st.markdown(response)
 
-if st.session_state.history:
+            # Zapisanie historii analiz
+            if "history" not in st.session_state:
+                st.session_state.history = []
+
+            st.session_state.history.append({
+                "data": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "wiadomość": message,
+                "ocena": response
+            })
+
+if "history" in st.session_state:
     st.markdown("---")
-    st.markdown("### 🗂 Historia analiz (sesja)")
+    st.markdown("### 📋 Historia analiz")
     df = pd.DataFrame(st.session_state.history)
     st.dataframe(df)
 
     csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Pobierz jako CSV", csv, file_name="analizy_cs.csv", mime="text/csv")
+    st.download_button("📥 Pobierz CSV", csv, file_name="oceny.csv", mime="text/csv")
