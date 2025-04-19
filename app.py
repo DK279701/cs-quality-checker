@@ -38,7 +38,7 @@ if st.button("🔍 Sprawdź wiadomość"):
                 "Zwróć uwagę na ton, profesjonalizm i kompletność odpowiedzi. "
                 "Odpowiedz po polsku.\n\n"
                 f"### Baza wiedzy:\n{knowledge_base}\n\n"
-                f"### Wiadomość agenta:\n{message}\n\n"
+                f"### Wiadomość agenta:\n{message}\n\n"  # Zakończenie ciągu
             )
 
             try:
@@ -52,13 +52,18 @@ if st.button("🔍 Sprawdź wiadomość"):
 
                 st.session_state.history.append({
                     "data": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "wiadomość 
-prompt = (
-    "Jesteś ekspertem ds. jakości w obsłudze klienta. "
-    "Sprawdź poniższą wiadomość agenta pod kątem zgodności z procedurami opisanymi w bazie wiedzy. "
-    "Zwróć uwagę na ton, profesjonalizm i kompletność odpowiedzi. "
-    "Odpowiedz po polsku.\n\n"
-    f"### Baza wiedzy:\n{knowledge_base}\n\n"
-    f"### Wiadomość agenta:\n{message}\n\n"  # Zakończenie ciągu
-)
+                    "wiadomość": message,
+                    "ocena": response
+                })
+            except Exception as e:
+                st.error(f"Błąd podczas generowania odpowiedzi: {str(e)}")
+                st.stop()
 
+if "history" in st.session_state:
+    st.markdown("---")
+    st.markdown("### 📋 Historia analiz")
+    df = pd.DataFrame(st.session_state.history)
+    st.dataframe(df)
+
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Pobierz CSV", csv, file_name="oceny.csv", mime="text/csv")
