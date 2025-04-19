@@ -38,7 +38,7 @@ if st.button("🔍 Sprawdź wiadomość"):
                 "Zwróć uwagę na ton, profesjonalizm i kompletność odpowiedzi. "
                 "Odpowiedz po polsku.\n\n"
                 f"### Baza wiedzy:\n{knowledge_base}\n\n"
-                f"### Wiadomość agenta:\n{message}\n\n"  # Zakończenie ciągu
+                f"### Wiadomość agenta:\n{message}\n\n"  # Poprawiony ciąg znaków z cudzysłowami
             )
 
             try:
