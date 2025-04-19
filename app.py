@@ -1,5 +1,7 @@
 import streamlit as st
 import openai
+import pandas as pd
+import datetime
 
 st.set_page_config(page_title="Sprawdzanie jakości CS", layout="centered")
 
@@ -13,6 +15,10 @@ if not api_key:
 
 openai.api_key = api_key
 
+# Historia analiz w sesji
+if "history" not in st.session_state:
+    st.session_state.history = []
+
 knowledge_base = st.text_area("📘 Wklej bazę wiedzy (możesz skopiować z Google Sites)", height=200)
 message = st.text_area("💬 Wklej wiadomość agenta", height=200)
 
@@ -24,9 +30,9 @@ if st.button("🔍 Sprawdź wiadomość"):
             prompt = (
                 "Jesteś ekspertem ds. jakości w obsłudze klienta. "
                 "Na podstawie poniższej bazy wiedzy sprawdź, czy wiadomość agenta jest zgodna z procedurami. "
-                "Jeśli nie, wskaż, co należy poprawić. Oceń także ogólną jakość wiadomości (ton, kompletność, profesjonalizm).\\n\\n"
-                f"### Baza wiedzy:\\n{knowledge_base}\\n\\n"
-                f"### Wiadomość agenta:\\n{message}\\n\\n"
+                "Jeśli nie, wskaż, co należy poprawić. Oceń także ogólną jakość wiadomości (ton, kompletność, profesjonalizm).\n\n"
+                f"### Baza wiedzy:\n{knowledge_base}\n\n"
+                f"### Wiadomość agenta:\n{message}\n\n"
                 "Odpowiedz w języku polskim."
             )
             try:
@@ -35,7 +41,26 @@ if st.button("🔍 Sprawdź wiadomość"):
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.3,
                 )
+                result = response.choices[0].message.content
                 st.success("✅ Analiza zakończona:")
-                st.markdown(response.choices[0].message.content)
+                st.markdown(result)
+
+                # Zapisz do historii
+                st.session_state.history.append({
+                    "data": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "wiadomość": message,
+                    "ocena": result
+                })
+
             except Exception as e:
                 st.error(f"Błąd podczas zapytania do OpenAI: {e}")
+
+# Pobierz historię
+if st.session_state.history:
+    st.markdown("---")
+    st.markdown("### 🗂 Historia analiz (sesja)")
+    df = pd.DataFrame(st.session_state.history)
+    st.dataframe(df)
+
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Pobierz jako CSV", csv, file_name="analizy_cs.csv", mime="text/csv")
