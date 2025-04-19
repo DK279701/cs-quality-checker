@@ -52,4 +52,14 @@ if st.button("🔍 Sprawdź wiadomość"):
 
                 st.session_state.history.append({
                     "data": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "wiadomość
+                    "wiadomość 
+                    # Zapytanie do modelu
+prompt = (
+    "Jesteś ekspertem ds. jakości w obsłudze klienta. "
+    "Sprawdź poniższą wiadomość agenta pod kątem zgodności z procedurami opisanymi w bazie wiedzy. "
+    "Zwróć uwagę na ton, profesjonalizm i kompletność odpowiedzi. "
+    "Odpowiedz po polsku.\n\n"
+    f"### Baza wiedzy:\n{knowledge_base}\n\n"
+    f"### Wiadomość agenta:\n{message}\n\n"  # Zakończenie ciągu
+)
+
