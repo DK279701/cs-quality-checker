@@ -3,6 +3,8 @@ import openai
 import pandas as pd
 import datetime
 
+from openai import OpenAI
+
 st.set_page_config(page_title="Sprawdzanie jakości CS", layout="centered")
 
 st.title("🕵️‍♂️ Sprawdzanie jakości wiadomości - Customer Service")
@@ -13,9 +15,8 @@ if not api_key:
     st.warning("Aby korzystać z aplikacji, wklej swój klucz OpenAI API powyżej.")
     st.stop()
 
-openai.api_key = api_key
+client = OpenAI(api_key=api_key)
 
-# Historia analiz w sesji
 if "history" not in st.session_state:
     st.session_state.history = []
 
@@ -36,7 +37,7 @@ if st.button("🔍 Sprawdź wiadomość"):
                 "Odpowiedz w języku polskim."
             )
             try:
-                response = openai.ChatCompletion.create(
+                response = client.chat.completions.create(
                     model="gpt-4",
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.3,
@@ -45,7 +46,6 @@ if st.button("🔍 Sprawdź wiadomość"):
                 st.success("✅ Analiza zakończona:")
                 st.markdown(result)
 
-                # Zapisz do historii
                 st.session_state.history.append({
                     "data": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "wiadomość": message,
@@ -55,7 +55,6 @@ if st.button("🔍 Sprawdź wiadomość"):
             except Exception as e:
                 st.error(f"Błąd podczas zapytania do OpenAI: {e}")
 
-# Pobierz historię
 if st.session_state.history:
     st.markdown("---")
     st.markdown("### 🗂 Historia analiz (sesja)")
