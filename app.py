@@ -3,13 +3,14 @@ import pandas as pd
 import datetime
 from transformers import pipeline
 
-# ——— Konfiguracja strony ———
+# ——— Ustawienia strony ———
 st.set_page_config(page_title="CS Quality (HF)", layout="centered")
-st.title("Sprawdzanie jakości CS (darmowe API HuggingFace)")
+st.title("🔍 Sprawdzanie jakości CS (darmowe API HuggingFace)")
 
-# ——— Token HuggingFace ———
-token = st.text_input("Token HF", type="password")
+# ——— Token HF ———
+token = st.text_input("Wklej token HuggingFace", type="password")
 if not token:
+    st.warning("Potrzebny jest token HF, aby ładować model.")
     st.stop()
 
 # ——— Ładowanie modelu ———
@@ -21,26 +22,33 @@ try:
         use_auth_token=token
     )
 except Exception as e:
-    st.error("Błąd ładowania modelu:\n" + str(e))
+    st.error("Błąd przy ładowaniu modelu:\n" + str(e))
     st.stop()
 
-# ——— Wejście użytkownika ———
+# ——— Wejście od użytkownika ———
 kb = st.text_area("Baza wiedzy", height=150)
 msg = st.text_area("Wiadomość agenta", height=150)
 
-# ——— Analiza i zapis historii ———
-if st.button("Sprawdź"):
+# ——— Generowanie i zapis historii ———
+if st.button("Sprawdź teraz"):
     if not kb.strip() or not msg.strip():
-        st.warning("Uzupełnij bazę i wiadomość.")
+        st.warning("Wypełnij obie sekcje.")
     else:
-        prompt = f"""Sprawdź tę wiadomość agenta pod kątem procedur i jakości:\n\nBaza:\n{kb}\n\nWiadomość:\n{msg}\n\nOdpowiedz po polsku."""
+        prompt = (
+            "Sprawdź tę wiadomość agenta pod kątem zgodności z procedurami i jakości:\n\n"
+            "Baza:\n" + kb + "\n\n"
+            "Wiadomość:\n" + msg + "\n\n"
+            "Odpowiedz po polsku."
+        )
         try:
             out = gen(prompt, max_length=256, num_return_sequences=1)[0]["generated_text"]
-            st.markdown("**Wynik:**\n\n" + out)
+            st.markdown("### Wynik analizy")
+            st.write(out)
         except Exception as e:
             st.error("Błąd generowania:\n" + str(e))
+            out = ""
 
-        # historia
+        # zapis historii
         hist = st.session_state.get("history", [])
         hist.append({
             "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -49,9 +57,10 @@ if st.button("Sprawdź"):
         })
         st.session_state.history = hist
 
-# ——— Wyświetlenie i pobranie historii ———
-if "history" in st.session_state:
+# ——— Wyświetlenie i eksport historii ———
+if "history" in st.session_state and st.session_state.history:
+    st.markdown("---")
     df = pd.DataFrame(st.session_state.history)
     st.dataframe(df)
     csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("Pobierz CSV", csv, "history.csv", "text/csv")
+    st.download_button("Pobierz historię CSV", csv, "history.csv", "text/csv")
