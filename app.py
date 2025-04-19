@@ -3,67 +3,67 @@ import pandas as pd
 import datetime
 from transformers import pipeline
 
-# Ustawienia aplikacji
 st.set_page_config(page_title="Sprawdzanie jakości CS (HuggingFace)", layout="centered")
-st.title("🧠 Lokalna analiza wiadomości Customer Service (darmowe API HuggingFace)")
-st.markdown("Wklej bazę wiedzy i wiadomość agenta – sprawdzimy jej jakość z wykorzystaniem darmowego modelu HuggingFace.")
+st.title("🧠 Analiza wiadomości CS z darmowym API HuggingFace")
+st.markdown("Wklej bazę wiedzy i wiadomość agenta – sprawdzimy jej jakość.")
 
-# Wprowadź swój token API z HuggingFace
-hf_api_key = st.text_input("🔐 Twój token API HuggingFace", type="password")
-
+hf_api_key = st.text_input("🔐 Token API HuggingFace", type="password")
 if not hf_api_key:
-    st.warning("Aby korzystać z aplikacji, wklej swój token API HuggingFace.")
+    st.warning("Wklej token API z HuggingFace, żeby działało.")
     st.stop()
 
-# Inicjalizujemy model NLP (GPT-2) z HuggingFace
+# Ładujemy model
 try:
-    model_name = "distilgpt2"  # Możesz spróbować innych modeli np. GPT-2, GPT-Neo
-    generator = pipeline("text-generation", model=model_name, tokenizer=model_name, use_auth_token=hf_api_key)
+    generator = pipeline(
+        "text-generation",
+        model="distilgpt2",
+        tokenizer="distilgpt2",
+        use_auth_token=hf_api_key
+    )
 except Exception as e:
-    st.error(f"Błąd przy ładowaniu modelu: {str(e)}")
+    st.error(f"❌ Błąd przy ładowaniu modelu:\n{e}")
     st.stop()
 
-# Zapytania od użytkownika
-knowledge_base = st.text_area("📘 Baza wiedzy (skopiowana z Google Sites)", height=200)
+knowledge_base = st.text_area("📘 Baza wiedzy", height=200)
 message = st.text_area("💬 Wiadomość agenta", height=200)
 
-if st.button("🔍 Sprawdź wiadomość"):
-    if not knowledge_base.strip() or not message.strip():
-        st.warning("Wprowadź zarówno bazę wiedzy, jak i wiadomość agenta.")
+if st.button("🔍 Sprawdź"):
+    if not knowledge_base or not message:
+        st.warning("Uzupełnij bazę wiedzy i wiadomość agenta.")
     else:
-        with st.spinner("Analiza lokalna..."):
-            prompt = (
-                "Jesteś ekspertem ds. jakości w obsłudze klienta. "
-                "Sprawdź poniższą wiadomość agenta pod kątem zgodności z procedurami opisanymi w bazie wiedzy. "
-                "Zwróć uwagę na ton, profesjonalizm i kompletność odpowiedzi. "
-                "Odpowiedz po polsku.\n\n"
-                f"### Baza wiedzy:\n{knowledge_base}\n\n"
-                f"### Wiadomość agenta:\n{message}\n\n"  # Ciąg tekstowy jest teraz poprawnie zakończony
-            )
+        with st.spinner("Analiza..."):
+            prompt = f"""Jesteś ekspertem ds. jakości w obsłudze klienta.
+Na podstawie tej bazy wiedzy sprawdź, czy wiadomość agenta jest zgodna z procedurami.
+Jeśli nie, wskaż, co poprawić. Oceń ton, profesjonalizm i kompletność odpowiedzi.
+
+### Baza wiedzy:
+{knowledge_base}
+
+### Wiadomość agenta:
+{message}
+
+Odpowiedz po polsku."""
 
             try:
-                response = generator(prompt, max_length=512, num_return_sequences=1)[0]["generated_text"]
+                out = generator(prompt, max_length=512, num_return_sequences=1)[0]["generated_text"]
                 st.success("✅ Analiza zakończona:")
-                st.markdown(response)
+                st.markdown(out)
 
-                # Zapisanie historii analiz
+                # zapisujemy historię
                 if "history" not in st.session_state:
                     st.session_state.history = []
-
                 st.session_state.history.append({
                     "data": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "wiadomość": message,
-                    "ocena": response
+                    "ocena": out
                 })
             except Exception as e:
-                st.error(f"Błąd podczas generowania odpowiedzi: {str(e)}")
-                st.stop()
+                st.error(f"❌ Błąd przy generowaniu:\n{e}")
 
-if "history" in st.session_state:
+# wyświetlamy historię
+if "history" in st.session_state and st.session_state.history:
     st.markdown("---")
-    st.markdown("### 📋 Historia analiz")
     df = pd.DataFrame(st.session_state.history)
     st.dataframe(df)
-
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Pobierz CSV", csv, file_name="oceny.csv", mime="text/csv")
+    csv = df.to_csv(index=False).encode("utf-8")
+    st.download_button("📥 Pobierz CSV", csv, "analizy.csv", "text/csv")
