@@ -1,2 +1,4 @@
+transformers
+huggingface_hub
 streamlit
-openai
+pandas
