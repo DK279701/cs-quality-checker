@@ -1,68 +1,41 @@
 import streamlit as st
-import pandas as pd
-import datetime
-from huggingface_hub.inference_api import InferenceApi
+import openai
 
-# –––––– konfiguracja strony
-st.set_page_config(page_title="CS Quality (HF Inference)", layout="centered")
-st.title("🔍 CS Quality Checker (Hugging Face free API)")
+st.set_page_config(page_title="Sprawdzanie jakości CS", layout="centered")
 
-# –––––– wprowadzenie tokena HF
-token = st.text_input("Wklej token HF", type="password")
-if not token:
-    st.warning("Potrzebny jest token HF, aby ładować model.")
+st.title("🕵️‍♂️ Sprawdzanie jakości wiadomości - Customer Service")
+st.markdown("Wklej wiadomość agenta oraz bazę wiedzy, a sprawdzimy, czy wiadomość jest zgodna z procedurami.")
+
+api_key = st.text_input("🔐 Twój klucz OpenAI API", type="password")
+if not api_key:
+    st.warning("Aby korzystać z aplikacji, wklej swój klucz OpenAI API powyżej.")
     st.stop()
 
-# –––––– inicjalizacja klienta Inference API
-try:
-    client = InferenceApi(repo_id="gpt2", token=token)
-except Exception as e:
-    st.error("Nie udało się załadować klienta HF:\n" + str(e))
-    st.stop()
+openai.api_key = api_key
 
-# –––––– wejście od użytkownika
-kb = st.text_area("Baza wiedzy (tekst)", height=150)
-msg = st.text_area("Wiadomość agenta", height=150)
+knowledge_base = st.text_area("📘 Wklej bazę wiedzy (możesz skopiować z Google Sites)", height=200)
+message = st.text_area("💬 Wklej wiadomość agenta", height=200)
 
-# –––––– analiza po naciśnięciu
-if st.button("Sprawdź jakość"):
-    if not kb.strip() or not msg.strip():
-        st.warning("Uzupełnij oba pola: baza wiedzy i wiadomość.")
+if st.button("🔍 Sprawdź wiadomość"):
+    if not knowledge_base.strip() or not message.strip():
+        st.error("Uzupełnij zarówno bazę wiedzy, jak i wiadomość agenta.")
     else:
-        prompt = (
-            "Jesteś ekspertem ds. jakości w obsłudze klienta.\n"
-            "Sprawdź tę wiadomość agenta pod kątem zgodności z procedurami " 
-            "opisanymi w poniższej bazie wiedzy. " 
-            "Zwróć uwagę na ton, profesjonalizm i kompletność.\n\n"
-            f"Baza wiedzy:\n{kb}\n\n"
-            f"Wiadomość agenta:\n{msg}\n\n"
-            "Odpowiedz po polsku."
-        )
-
-        try:
-            # wywołanie HF Inference API – darmowe do pewnych limitów
-            result = client(inputs=prompt)
-            # HF zwykle zwraca listę generowanych tekstów
-            out_text = result[0]['generated_text'] if isinstance(result, list) else str(result)
-            st.markdown("**Wynik analizy:**")
-            st.write(out_text)
-        except Exception as e:
-            st.error("Błąd podczas wywołania API HF:\n" + str(e))
-            out_text = ""
-
-        # zapis historii
-        history = st.session_state.get("history", [])
-        history.append({
-            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "message": msg,
-            "analysis": out_text
-        })
-        st.session_state.history = history
-
-# –––––– wyświetlenie i eksport historii
-if st.session_state.get("history"):
-    st.markdown("---")
-    df = pd.DataFrame(st.session_state.history)
-    st.dataframe(df)
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("Pobierz historię CSV", csv, "history.csv", "text/csv")
+        with st.spinner("Analizuję wiadomość..."):
+            prompt = (
+                "Jesteś ekspertem ds. jakości w obsłudze klienta. "
+                "Na podstawie poniższej bazy wiedzy sprawdź, czy wiadomość agenta jest zgodna z procedurami. "
+                "Jeśli nie, wskaż, co należy poprawić. Oceń także ogólną jakość wiadomości (ton, kompletność, profesjonalizm).\\n\\n"
+                f"### Baza wiedzy:\\n{knowledge_base}\\n\\n"
+                f"### Wiadomość agenta:\\n{message}\\n\\n"
+                "Odpowiedz w języku polskim."
+            )
+            try:
+                response = openai.ChatCompletion.create(
+                    model="gpt-4",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                )
+                st.success("✅ Analiza zakończona:")
+                st.markdown(response.choices[0].message.content)
+            except Exception as e:
+                st.error(f"Błąd podczas zapytania do OpenAI: {e}")
