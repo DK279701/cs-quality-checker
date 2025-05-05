@@ -18,7 +18,7 @@ st.sidebar.header("📅 Zakres dat")
 start_date = st.sidebar.date_input("Start",  value=datetime.utcnow().date() - pd.Timedelta(days=7))
 end_date   = st.sidebar.date_input("Koniec", value=datetime.utcnow().date())
 
-# Zamieniamy na datetime z godzinami UTC
+# Zamiana na datetime z godzinami UTC
 since_dt = datetime.combine(start_date, dtime.min)
 until_dt = datetime.combine(end_date,   dtime.max)
 since_iso = since_dt.isoformat() + "Z"
@@ -28,20 +28,32 @@ until_iso = until_dt.isoformat() + "Z"
 @st.cache_data(ttl=300)
 def fetch_front(token, inbox, since_dt, until_dt):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    params = {"inbox_id": inbox} if inbox else {}
-    resp = requests.get("https://api2.frontapp.com/conversations", headers=headers, params=params)
-    resp.raise_for_status()
-    convs = resp.json()["_results"]
+    params = {
+        "inbox_id":      inbox,
+        "changed_since": since_dt.isoformat() + "Z",
+        "page_size":     100
+    }
+    url = "https://api2.frontapp.com/conversations"
+    convs = []
+    # paginacja po konwersacjach
+    while True:
+        r = requests.get(url, headers=headers, params={k: v for k, v in params.items() if v})
+        r.raise_for_status()
+        data = r.json()
+        convs.extend(data.get("_results", []))
+        cursor = data.get("_cursor")
+        if not cursor:
+            break
+        params["cursor"] = cursor
 
     msgs = []
     for c in convs:
         r2 = requests.get(f"https://api2.frontapp.com/conversations/{c['id']}/messages", headers=headers)
         r2.raise_for_status()
-        for m in r2.json()["_results"]:
+        for m in r2.json().get("_results", []):
             ct = m.get("created_at")
             if not ct:
                 continue
-            # parsujemy datę z Front (YYYY-MM-DDTHH:MM:SSZ)
             try:
                 created = datetime.fromisoformat(ct.replace("Z", "+00:00"))
             except:
@@ -56,6 +68,7 @@ def fetch_front(token, inbox, since_dt, until_dt):
                 })
     return pd.DataFrame(msgs)
 
+# ——— POBIERANIE KONWERSACJI —————————————————————
 if not api_token:
     st.sidebar.warning("🔑 Podaj Front API Token")
     st.stop()
@@ -73,7 +86,10 @@ if st.sidebar.button("▶️ Pobierz wiadomości"):
         st.stop()
 
     API_URL = "https://api.openai.com/v1/chat/completions"
-    HEADERS = {"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"}
+    HEADERS = {
+        "Authorization": f"Bearer {openai_key}",
+        "Content-Type":  "application/json"
+    }
 
     SYSTEM_PROMPT = (
         "Jesteś Menedżerem Customer Service w Bookinghost i oceniasz jakość wiadomości agentów "
@@ -87,7 +103,7 @@ if st.sidebar.button("▶️ Pobierz wiadomości"):
         "Uzasadnienie: • punkt 1\n• punkt 2"
     )
 
-    # ——— FUNKCJE DO ASYNC ANALYSIS ————————————————————
+    # ——— ASYNC ANALYSIS ————————————————————
     async def analyze_one(session, rec):
         payload = {
             "model": "gpt-3.5-turbo",
@@ -112,7 +128,7 @@ if st.sidebar.button("▶️ Pobierz wiadomości"):
             for i in range(0, len(recs), batch_size):
                 batch = recs[i : i + batch_size]
                 tasks = [analyze_one(sess, r) for r in batch]
-                res = await asyncio.gather(*tasks)
+                res   = await asyncio.gather(*tasks)
                 out.extend(res)
                 done = min(i + batch_size, len(recs))
                 progress.progress(done / len(recs))
