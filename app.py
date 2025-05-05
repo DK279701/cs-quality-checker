@@ -28,6 +28,11 @@ if api_key and uploaded_file:
             st.error(f"Błąd podczas ładowania pliku CSV: {str(e)}")
             st.stop()
 
+        # Sprawdzamy dostępne kolumny w pliku CSV
+        if 'Message date' not in data.columns:
+            st.error(f"Kolumna 'Message date' nie została znaleziona w pliku. Dostępne kolumny to: {', '.join(data.columns)}")
+            st.stop()
+
         # Filtrowanie danych po agencie
         if filter_agent != "Wszyscy":
             data = data[data['Author'] == filter_agent]
