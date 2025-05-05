@@ -27,15 +27,17 @@ until_iso = until_dt.isoformat() + "Z"
 # ——— FETCH FRONT MESSAGES ————————————————————
 @st.cache_data(ttl=300)
 def fetch_front(token, inbox, since_dt, until_dt):
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept":        "application/json"
+    }
     params = {
-        "inbox_id":      inbox,
-        "changed_since": since_dt.isoformat() + "Z",
-        "page_size":     100
+        "inbox_id":  inbox,
+        "page_size": 100
     }
     url = "https://api2.frontapp.com/conversations"
     convs = []
-    # paginacja po konwersacjach
+    # paginacja po wszystkich konwersacjach
     while True:
         r = requests.get(url, headers=headers, params={k: v for k, v in params.items() if v})
         r.raise_for_status()
@@ -48,7 +50,7 @@ def fetch_front(token, inbox, since_dt, until_dt):
 
     msgs = []
     for c in convs:
-        r2 = requests.get(f"https://api2.frontapp.com/conversations/{c['id']}/messages", headers=headers)
+        r2 = requests.get(f"{url}/{c['id']}/messages", headers=headers)
         r2.raise_for_status()
         for m in r2.json().get("_results", []):
             ct = m.get("created_at")
@@ -58,6 +60,7 @@ def fetch_front(token, inbox, since_dt, until_dt):
                 created = datetime.fromisoformat(ct.replace("Z", "+00:00"))
             except:
                 continue
+            # teraz filtrujemy po datach
             if since_dt <= created <= until_dt:
                 msgs.append({
                     "Conversation ID": c["id"],
