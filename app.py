@@ -19,7 +19,7 @@ async def analyze_message_async(message_row):
     """
 
     # Zlecenie analizy do modelu GPT-4 (lub innego modelu)
-    response = openai.chat_completions.create(
+    response = openai.ChatCompletion.create(
         model="gpt-4",  # Możesz zmienić model na odpowiedni (np. gpt-4, gpt-3.5-turbo)
         messages=[
             {"role": "system", "content": instructions},
