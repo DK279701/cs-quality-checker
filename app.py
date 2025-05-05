@@ -19,14 +19,17 @@ async def analyze_message_async(message_row):
     """
 
     # Zlecenie analizy do modelu GPT-4 (lub innego modelu)
-    response = openai.completions.create(
+    response = openai.chat_completions.create(
         model="gpt-4",  # Możesz zmienić model na odpowiedni (np. gpt-4, gpt-3.5-turbo)
-        prompt=f"{instructions}\nOcena tej wiadomości: '{message}'",
+        messages=[
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": message}
+        ],
         max_tokens=1000,
         temperature=0.7
     )
 
-    quality_score = response['choices'][0]['text'].strip()
+    quality_score = response['choices'][0]['message']['content'].strip()
     return {
         "Message ID": message_row.get('Message ID', ''),
         "Author": author,
