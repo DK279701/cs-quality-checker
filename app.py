@@ -44,7 +44,7 @@ uploaded_file = st.file_uploader("Załaduj plik CSV", type=["csv"])
 if uploaded_file:
     try:
         # Wczytanie pliku z uwzględnieniem separatora i błędnych linii
-        data = pd.read_csv(uploaded_file, sep=';', encoding='utf-8', error_bad_lines=False, warn_bad_lines=True)
+        data = pd.read_csv(uploaded_file, sep=';', encoding='utf-8', on_bad_lines='skip')
         
         # Przefiltrowanie danych (opcjonalnie, np. wybór agenta)
         filter_agent = st.selectbox("Wybierz agenta", options=["Wszyscy"] + list(data['Author'].unique()))
