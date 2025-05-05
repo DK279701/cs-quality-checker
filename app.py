@@ -1,141 +1,131 @@
 import streamlit as st
 import pandas as pd
+import requests
 import aiohttp
 import asyncio
 import time
+from datetime import datetime, time as dtime
 
-st.set_page_config(page_title="Szybka analiza CS – Bookinghost", layout="wide")
-st.title("⚡ Szybka analiza jakości wiadomości – Bookinghost")
+st.set_page_config(page_title="CS Quality Checker – Bookinghost", layout="wide")
+st.title("📥 Pobieranie i analiza wiadomości z Front")
 
-# 1. Klucz API
-api_key = st.text_input("🔑 Wklej OpenAI API Key", type="password")
-if not api_key:
-    st.warning("Wprowadź swój OpenAI API Key, aby zacząć.")
+# ——— SIDEBAR: FRONT API & DATE RANGE —————————————————
+st.sidebar.header("🔗 Ustawienia Front API")
+api_token = st.sidebar.text_input("Front API Token", type="password")
+inbox_id   = st.sidebar.text_input("Inbox ID (opcjonalnie)")
+
+st.sidebar.header("📅 Zakres dat")
+start_date = st.sidebar.date_input("Start", value=datetime.utcnow().date() - pd.Timedelta(days=7))
+end_date   = st.sidebar.date_input("Koniec", value=datetime.utcnow().date())
+# formatuj do ISO
+since = datetime.combine(start_date, dtime.min).isoformat() + "Z"
+until = datetime.combine(end_date, dtime.max).isoformat() + "Z"
+
+# ——— FETCHING WIADOMOŚCI Z FRONT ————————————————————
+@st.cache_data(ttl=300)
+def fetch_front(token, inbox=None):
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    params = {"inbox_id": inbox} if inbox else {}
+    resp = requests.get("https://api2.frontapp.com/conversations", headers=headers, params=params)
+    resp.raise_for_status()
+    convs = resp.json()["_results"]
+    msgs = []
+    for c in convs:
+        r2 = requests.get(f"https://api2.frontapp.com/conversations/{c['id']}/messages", headers=headers)
+        r2.raise_for_status()
+        for m in r2.json()["_results"]:
+            ct = m.get("created_at")
+            if ct and since <= ct <= until:
+                msgs.append({
+                    "Conversation ID": c["id"],
+                    "Message ID": m["id"],
+                    "Author": m["author"]["handle"],
+                    "Extract": m["body"],
+                    "Created At": ct
+                })
+    return pd.DataFrame(msgs)
+
+if not api_token:
+    st.warning("Wprowadź Front API Token w panelu bocznym.")
     st.stop()
 
-# 2. Wczytanie CSV
-uploaded = st.file_uploader("📁 Wgraj plik CSV (separator `;`)", type="csv")
-if not uploaded:
-    st.stop()
+if st.sidebar.button("▶️ Pobierz wiadomości"):
+    with st.spinner("Pobieranie…"):
+        df = fetch_front(api_token, inbox_id or None)
+    st.success(f"Pobrano {len(df)} wiadomości ({since} ↔ {until})")
+    st.dataframe(df)
 
-try:
-    df = pd.read_csv(uploaded, sep=";", encoding="utf-8", on_bad_lines="skip")
-except Exception as e:
-    st.error(f"Błąd wczytywania CSV: {e}")
-    st.stop()
-
-if "Author" not in df.columns or "Extract" not in df.columns:
-    st.error("Plik musi mieć kolumny `Author` i `Extract`.")
-    st.stop()
-
-# 3. Przygotuj listę wiadomości
-records = df[["Author", "Extract"]].dropna().to_dict(orient="records")
-n = len(records)
-st.write(f"Załadowano **{n}** wiadomości do analizy.")
-
-# 4. Endpoint i nagłówki
-API_URL = "https://api.openai.com/v1/chat/completions"
-HEADERS = {
-    "Authorization": f"Bearer {api_key}",
-    "Content-Type": "application/json"
-}
-
-# 5. System prompt
-SYSTEM_PROMPT = (
-    "Jesteś Menedżerem Customer Service w Bookinghost i oceniasz jakość wiadomości agentów. "
-    "Oceń w skali 1–5 pod kątem:\n"
-    "• empatii i uprzejmości\n"
-    "• poprawności językowej\n"
-    "• zgodności z procedurami\n"
-    "• tonu komunikacji (ciepły, profesjonalny)\n\n"
-    "Zwróć krótką odpowiedź:\n"
-    "Ocena: X/5\n"
-    "Uzasadnienie: • punkt 1\n• punkt 2"
-)
-
-# 6. Funkcja analizująca jedną wiadomość
-async def analyze(session, rec):
-    user = rec["Extract"]
-    payload = {
-        "model": "gpt-3.5-turbo",
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": user}
-        ],
-        "temperature": 0.3,
-        "max_tokens": 200
-    }
-    try:
-        async with session.post(API_URL, headers=HEADERS, json=payload) as resp:
-            js = await resp.json()
-            return {
-                "Author": rec["Author"],
-                "Extract": user,
-                "Feedback": js["choices"][0]["message"]["content"].strip()
-            }
-    except Exception as e:
-        return {
-            "Author": rec["Author"],
-            "Extract": user,
-            "Feedback": f"❌ Błąd: {e}"
-        }
-
-# 7. Batchowa pętla
-async def run_all(records, progress_bar, status_text):
-    results = []
-    batch_size = 20
-    async with aiohttp.ClientSession() as session:
-        for i in range(0, len(records), batch_size):
-            batch = records[i : i + batch_size]
-            tasks = [analyze(session, rec) for rec in batch]
-            batch_res = await asyncio.gather(*tasks)
-            results.extend(batch_res)
-            done = min(i + batch_size, len(records))
-            progress_bar.progress(done / len(records))
-            status_text.text(f"Przetworzono: {done}/{len(records)}")
-    return results
-
-# 8. Wywołanie i mierzenie czasu
-if st.button("▶️ Rozpocznij analizę"):
-    progress = st.progress(0.0)
-    status = st.empty()
-    start = time.time()
-    with st.spinner("Analiza w toku…"):
-        results = asyncio.run(run_all(records, progress, status))
-    elapsed = time.time() - start
-    st.success(f"✅ Zakończono w {elapsed:.1f} s")
-
-    # 9. Prezentacja wyników
-    res_df = pd.DataFrame(results)
-
-    # Parsowanie ocen liczbowych
-    def parse_score(txt):
-        for ln in txt.splitlines():
-            if ln.lower().startswith("ocena"):
-                try:
-                    return float(ln.split(":")[1].split("/")[0].strip())
-                except:
-                    pass
-        return None
-
-    res_df["Score"] = res_df["Feedback"].apply(parse_score)
-
-    st.subheader("📈 Raport zbiorczy")
-    team_avg = res_df["Score"].mean()
-    st.metric("Średnia ocena zespołu", f"{team_avg:.2f}/5")
-    st.metric("Liczba wiadomości", len(res_df))
-
-    st.subheader("👤 Wyniki agentów")
-    ag = (
-        res_df
-        .groupby("Author")
-        .agg(Średnia=("Score","mean"), Liczba=("Score","count"))
-        .round(2)
-        .sort_values("Średnia", ascending=False)
-        .reset_index()
+    # ——— ANALIZA BATCH + RAG ————————————————————
+    SYSTEM_PROMPT = (
+        "Jesteś Managerem Customer Service w Bookinghost i oceniasz jakość odpowiedzi agentów "
+        "w skali 1–5. Weź pod uwagę:\n"
+        "• empatię i uprzejmość\n"
+        "• poprawność językową\n"
+        "• zgodność z procedurami\n"
+        "• ton (ciepły, profesjonalny)\n\n"
+        "Odpowiedz w formacie:\n"
+        "Ocena: X/5\n"
+        "Uzasadnienie: • punkt 1\n• punkt 2"
     )
-    st.dataframe(ag, use_container_width=True)
+    API_URL = "https://api.openai.com/v1/chat/completions"
+    HEADERS = {"Authorization": f"Bearer {st.text_input('🔑 Wklej OpenAI API Key', type='password')}"}
 
-    st.subheader("📥 Pobierz pełny raport (CSV)")
-    st.download_button("⬇️ CSV", data=res_df.to_csv(index=False, sep=";").encode("utf-8"),
-                       file_name="raport_quality.csv", mime="text/csv")
+    async def analyze_one(session, rec):
+        payload = {
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": rec["Extract"]},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 200
+        }
+        async with session.post(API_URL, headers=HEADERS, json=payload) as r:
+            j = await r.json()
+            return j["choices"][0]["message"]["content"].strip()
+
+    async def run_all(recs, progress, status):
+        out = []
+        batch = 20
+        async with aiohttp.ClientSession() as sess:
+            for i in range(0, len(recs), batch):
+                slice_ = recs[i : i + batch]
+                tasks = [analyze_one(sess, r) for r in slice_]
+                res = await asyncio.gather(*tasks)
+                out.extend(res)
+                done = min(i + batch, len(recs))
+                progress.progress(done / len(recs))
+                status.text(f"Przetworzono {done}/{len(recs)}")
+        return out
+
+    # uruchomienie
+    recs = df.to_dict(orient="records")
+    progress = st.progress(0.0)
+    status   = st.empty()
+    start = time.time()
+    with st.spinner("Analiza…"):
+        feedbacks = asyncio.run(run_all(recs, progress, status))
+    elapsed = time.time() - start
+    st.success(f"Analiza zakończona w {elapsed:.1f}s")
+
+    df["Feedback"] = feedbacks
+    # wyciąganie score
+    def parse_score(t):
+        for l in t.splitlines():
+            if l.lower().startswith("ocena"):
+                try: return float(l.split(":")[1].split("/")[0])
+                except: pass
+        return None
+    df["Score"] = df["Feedback"].map(parse_score)
+
+    # prezentacja
+    st.header("📈 Podsumowanie zespołu")
+    st.metric("Średnia ocena", f"{df['Score'].mean():.2f}/5")
+    st.metric("Wiadomości", len(df))
+
+    st.header("👤 Raport agentów")
+    agg = df.groupby("Author").agg(Śr_Ocena=("Score","mean"), Liczba=("Score","count")).round(2).reset_index()
+    st.dataframe(agg, use_container_width=True)
+
+    st.header("📥 Pobierz pełen raport")
+    st.download_button("⬇️ CSV", df.to_csv(index=False, sep=";"), "raport.csv", "text/csv")
