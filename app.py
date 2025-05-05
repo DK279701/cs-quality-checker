@@ -28,6 +28,9 @@ if api_key and uploaded_file:
             st.error(f"Błąd podczas ładowania pliku CSV: {str(e)}")
             st.stop()
 
+        # Oczyszczanie nazw kolumn z ewentualnych białych znaków
+        data.columns = data.columns.str.strip()
+
         # Sprawdzamy dostępne kolumny w pliku CSV
         if 'Message date' not in data.columns:
             st.error(f"Kolumna 'Message date' nie została znaleziona w pliku. Dostępne kolumny to: {', '.join(data.columns)}")
