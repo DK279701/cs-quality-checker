@@ -19,10 +19,10 @@ if api_key and uploaded_file:
         # Dodajemy możliwość ustawienia kodowania i separatora
         encoding = st.text_input("Podaj kodowanie pliku (np. 'utf-8')", "utf-8")
         sep = st.text_input("Podaj separator pliku (np. ',' lub ';')", ",")
-        
+
         # Wczytanie danych z pliku CSV
         try:
-            data = pd.read_csv(uploaded_file, encoding=encoding, sep=sep)
+            data = pd.read_csv(uploaded_file, encoding=encoding, sep=sep, error_bad_lines=False)
             st.success("Plik załadowany – rozpoczynam analizę...")
         except Exception as e:
             st.error(f"Błąd podczas ładowania pliku CSV: {str(e)}")
