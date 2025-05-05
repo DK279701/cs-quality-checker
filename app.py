@@ -12,15 +12,23 @@ uploaded_file = st.file_uploader("Wgraj plik CSV z danymi z Front", type="csv")
 filter_date = st.date_input("Wybierz datę początkową", min_value=pd.to_datetime('2020-01-01'))
 
 # Filtrowanie wiadomości po agencie
-filter_agent = st.selectbox("Wybierz agenta", options=["Wszyscy"] + list(pd.read_csv(uploaded_file).get('Author',[]).unique()))
+filter_agent = st.selectbox("Wybierz agenta", options=["Wszyscy"])
 
 if api_key and uploaded_file:
     try:
-        # Wczytanie danych z pliku CSV
-        data = pd.read_csv(uploaded_file, encoding='utf-8', sep=',')  # Można dodać encoding i separator jeżeli potrzeba
-        st.success("Plik załadowany – rozpoczynam analizę...")
+        # Dodajemy możliwość ustawienia kodowania i separatora
+        encoding = st.text_input("Podaj kodowanie pliku (np. 'utf-8')", "utf-8")
+        sep = st.text_input("Podaj separator pliku (np. ',' lub ';')", ",")
         
-        # Filtrowanie danych
+        # Wczytanie danych z pliku CSV
+        try:
+            data = pd.read_csv(uploaded_file, encoding=encoding, sep=sep)
+            st.success("Plik załadowany – rozpoczynam analizę...")
+        except Exception as e:
+            st.error(f"Błąd podczas ładowania pliku CSV: {str(e)}")
+            st.stop()
+
+        # Filtrowanie danych po agencie
         if filter_agent != "Wszyscy":
             data = data[data['Author'] == filter_agent]
 
