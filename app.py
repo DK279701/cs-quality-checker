@@ -3,47 +3,81 @@ import pandas as pd
 import openai
 import time
 
-# ⚡️ Wprowadzenie API Key (nie zapisuje tego!)
+# Ustawienie tytułu
+st.title("System premiowy – analiza jakości wiadomości")
+
+# Wczytanie API key
 openai_api_key = st.text_input("Wklej swój OpenAI API Key", type="password")
 
-# Ὄ2 Wczytanie pliku CSV
-st.title("💼 System oceny jakości i produktywności agentów Bookinghost")
-uploaded_file = st.file_uploader("Wgraj plik CSV z Front (dane wiadomości)", type="csv")
+# Wczytanie pliku CSV
+uploaded_file = st.file_uploader("Wgraj plik CSV z danymi z Front", type="csv")
+
+# Ustawienie modelu
+model = "gpt-4"
 
 if uploaded_file and openai_api_key:
-    df = pd.read_csv(uploaded_file)
+    openai.api_key = openai_api_key
+    data = pd.read_csv(uploaded_file)
 
-    if 'Author' not in df.columns or 'Extract' not in df.columns:
-        st.error("Brakuje kolumny 'Author' lub 'Extract' w pliku CSV")
-    else:
-        st.success("Plik poprawnie wczytany! Rozpoczynam ocenianie wiadomości...")
+    st.success("Plik CSV załadowany poprawnie. Rozpoczynam analizę...")
 
-        results = []
-        for idx, row in df.iterrows():
-            message = row['Extract']
-            author = row['Author']
-            try:
-                response = openai.ChatCompletion.create(
-                    model="gpt-4",
-                    api_key=openai_api_key,
-                    messages=[
-                        {"role": "system", "content": "Jesteś ekspertem ds. jakości obsługi klienta Bookinghost. Oceń poniższą wiadomość według standardów firmy. Odpowiedz TYLKO TAK lub NIE oraz uzasadnij ocenę."},
-                        {"role": "user", "content": message}
-                    ]
-                )
-                gpt_answer = response.choices[0].message.content
-            except Exception as e:
-                gpt_answer = f"Błąd: {e}"
+    # Pasek postępu
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
+    results = []
+
+    for i, row in enumerate(data.itertuples()):
+        agent = getattr(row, "Author", "")
+        message = getattr(row, "Extract", "")
+        msg_id = getattr(row, "Message_ID", "")
+
+        if not message or pd.isna(message):
+            continue
+
+        try:
+            response = openai.ChatCompletion.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Jesteś ekspertem od obsługi klienta. Oceń jakość wiadomości agenta pod kątem poprawności, zgodności z procedurami i tonu komunikacji."},
+                    {"role": "user", "content": f"Wiadomość agenta: {message}"}
+                ],
+                temperature=0.3
+            )
+
+            reply = response.choices[0].message.content
             results.append({
-                "Author": author,
-                "Extract": message,
-                "GPT-ocena": gpt_answer
+                "Message ID": msg_id,
+                "Agent": agent,
+                "Original Message": message,
+                "GPT Feedback": reply
             })
-            time.sleep(1.2)  # uniknij przekroczenia limitu API
 
-        result_df = pd.DataFrame(results)
-        st.dataframe(result_df)
+        except Exception as e:
+            results.append({
+                "Message ID": msg_id,
+                "Agent": agent,
+                "Original Message": message,
+                "GPT Feedback": f"Błąd: {str(e)}"
+            })
 
-        csv = result_df.to_csv(index=False).encode('utf-8')
-        st.download_button("🔧 Pobierz wyniki jako CSV", data=csv, file_name="ocena_jakosci.csv", mime='text/csv')
+        # Aktualizacja postępu
+        status_text.text(f"Analizuję wiadomość {i + 1} z {len(data)}...")
+        progress_bar.progress((i + 1) / len(data))
+
+    st.success("Analiza zakończona!")
+
+    # Konwersja wyników do DataFrame
+    results_df = pd.DataFrame(results)
+
+    # Wyświetlenie tabeli
+    st.dataframe(results_df)
+
+    # Możliwość pobrania pliku CSV z wynikami
+    csv_download = results_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="Pobierz wyniki analizy jako CSV",
+        data=csv_download,
+        file_name="wyniki_analizy.csv",
+        mime="text/csv"
+    )
