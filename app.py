@@ -15,32 +15,44 @@ api_token = st.sidebar.text_input("Front API Token", type="password")
 inbox_id   = st.sidebar.text_input("Inbox ID (opcjonalnie)")
 
 st.sidebar.header("📅 Zakres dat")
-start_date = st.sidebar.date_input("Start", value=datetime.utcnow().date() - pd.Timedelta(days=7))
+start_date = st.sidebar.date_input("Start",  value=datetime.utcnow().date() - pd.Timedelta(days=7))
 end_date   = st.sidebar.date_input("Koniec", value=datetime.utcnow().date())
-since = datetime.combine(start_date, dtime.min).isoformat() + "Z"
-until = datetime.combine(end_date,   dtime.max).isoformat() + "Z"
+
+# Zamieniamy na datetime z godzinami UTC
+since_dt = datetime.combine(start_date, dtime.min)
+until_dt = datetime.combine(end_date,   dtime.max)
+since_iso = since_dt.isoformat() + "Z"
+until_iso = until_dt.isoformat() + "Z"
 
 # ——— FETCH FRONT MESSAGES ————————————————————
 @st.cache_data(ttl=300)
-def fetch_front(token, inbox=None):
+def fetch_front(token, inbox, since_dt, until_dt):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     params = {"inbox_id": inbox} if inbox else {}
-    r = requests.get("https://api2.frontapp.com/conversations", headers=headers, params=params)
-    r.raise_for_status()
-    convs = r.json()["_results"]
+    resp = requests.get("https://api2.frontapp.com/conversations", headers=headers, params=params)
+    resp.raise_for_status()
+    convs = resp.json()["_results"]
+
     msgs = []
     for c in convs:
         r2 = requests.get(f"https://api2.frontapp.com/conversations/{c['id']}/messages", headers=headers)
         r2.raise_for_status()
         for m in r2.json()["_results"]:
             ct = m.get("created_at")
-            if ct and since <= ct <= until:
+            if not ct:
+                continue
+            # parsujemy datę z Front (YYYY-MM-DDTHH:MM:SSZ)
+            try:
+                created = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+            except:
+                continue
+            if since_dt <= created <= until_dt:
                 msgs.append({
                     "Conversation ID": c["id"],
                     "Message ID":      m["id"],
                     "Author":          m["author"]["handle"],
                     "Extract":         m["body"],
-                    "Created At":      ct
+                    "Created At":      created
                 })
     return pd.DataFrame(msgs)
 
@@ -50,11 +62,11 @@ if not api_token:
 
 if st.sidebar.button("▶️ Pobierz wiadomości"):
     with st.spinner("⏳ Pobieranie…"):
-        df = fetch_front(api_token, inbox_id or None)
-    st.success(f"Pobrano {len(df)} wiadomości ({since} ↔ {until})")
+        df = fetch_front(api_token, inbox_id or None, since_dt, until_dt)
+    st.success(f"Pobrano {len(df)} wiadomości ({since_iso} ↔ {until_iso})")
     st.dataframe(df)
 
-    # ——— SETUP OPENAI ————————————————————
+    # ——— USTAWIENIA OPENAI ————————————————————
     openai_key = st.sidebar.text_input("🗝️ OpenAI API Key", type="password")
     if not openai_key:
         st.sidebar.warning("🗝️ Podaj OpenAI API Key")
@@ -75,7 +87,7 @@ if st.sidebar.button("▶️ Pobierz wiadomości"):
         "Uzasadnienie: • punkt 1\n• punkt 2"
     )
 
-    # ——— ASYNC ANALYSIS ————————————————————
+    # ——— FUNKCJE DO ASYNC ANALYSIS ————————————————————
     async def analyze_one(session, rec):
         payload = {
             "model": "gpt-3.5-turbo",
@@ -100,14 +112,14 @@ if st.sidebar.button("▶️ Pobierz wiadomości"):
             for i in range(0, len(recs), batch_size):
                 batch = recs[i : i + batch_size]
                 tasks = [analyze_one(sess, r) for r in batch]
-                res   = await asyncio.gather(*tasks)
+                res = await asyncio.gather(*tasks)
                 out.extend(res)
                 done = min(i + batch_size, len(recs))
                 progress.progress(done / len(recs))
                 status.text(f"Przetworzono: {done}/{len(recs)}")
         return out
 
-    # ——— RUN & MEASURE ————————————————————
+    # ——— URUCHOMIENIE ANALIZY ————————————————————
     recs     = df.to_dict(orient="records")
     progress = st.progress(0.0)
     status   = st.empty()
@@ -117,9 +129,9 @@ if st.sidebar.button("▶️ Pobierz wiadomości"):
     elapsed = time.time() - start
     st.success(f"✅ Zakończono w {elapsed:.1f}s")
 
+    # ——— PODSUMOWANIE I RAPORT ————————————————————
     df["Feedback"] = feedbacks
 
-    # ——— PARSE SCORES & REPORT ————————————————————
     def parse_score(txt):
         for l in txt.splitlines():
             if l.lower().startswith("ocena"):
