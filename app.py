@@ -1,135 +1,101 @@
 import streamlit as st
 import pandas as pd
 import openai
-import time
 import asyncio
-import aiohttp
-from datetime import datetime
+import time
 
-st.set_page_config(page_title="Analiza jakości wiadomości CS", layout="wide")
-st.title("📊 Analiza jakości obsługi klienta Bookinghost")
+# Konfiguracja OpenAI API Key
+openai.api_key = st.text_input("Wprowadź swój API key OpenAI", type="password")
 
-api_key = st.text_input("🔑 Wklej swój OpenAI API Key", type="password")
+# Funkcja do analizy wiadomości
+async def analyze_message_async(message_row):
+    message = message_row.get('Extract', '')
+    author = message_row.get('Author', 'Unknown')
+    
+    # Wytyczne do analizy jakościowej
+    instructions = """
+    Jesteś menedżerem obsługi klienta w firmie Bookinghost i chcesz zapewnić, aby jakość komunikacji w Twoim zespole była jak najwyższa. Każda wiadomość, którą analizujesz, powinna być oceniona pod kątem profesjonalizmu, skuteczności, uprzedzeń i szybkości odpowiedzi.
+    Dodatkowo, pamiętaj, że analiza powinna brać pod uwagę poprawność językową, zgodność z procedurami oraz ton odpowiedzi, który musi być uprzedzająco pomocny.
+    """
 
-uploaded_file = st.file_uploader("📁 Wgraj plik CSV z wiadomościami (separator ;)", type=["csv"])
+    # Zlecenie analizy do modelu GPT-3
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": f"Ocena tej wiadomości: '{message}'"}
+        ]
+    )
 
-if api_key and uploaded_file:
-    openai.api_key = api_key
+    quality_score = response['choices'][0]['message']['content']
+    return {
+        "Message ID": message_row.get('Message ID', ''),
+        "Author": author,
+        "Quality Score": quality_score,
+        "Feedback": "Analiza zakończona",
+        "Justification": "Model ocenił jakość komunikacji na podstawie podanych wytycznych."
+    }
 
+# Interfejs użytkownika w Streamlit
+st.title("Narzędzie do analizy jakości obsługi klienta w Bookinghost")
+
+# Wczytywanie pliku CSV
+uploaded_file = st.file_uploader("Załaduj plik CSV", type=["csv"])
+if uploaded_file:
     try:
-        data = pd.read_csv(uploaded_file, sep=";", encoding="utf-8")
-    except Exception as e:
-        st.error(f"Błąd podczas wczytywania pliku: {e}")
-        st.stop()
+        # Wczytanie pliku
+        data = pd.read_csv(uploaded_file)
+        
+        # Przefiltrowanie danych (opcjonalnie, np. wybór agenta)
+        filter_agent = st.selectbox("Wybierz agenta", options=["Wszyscy"] + list(data['Author'].unique()))
+        if filter_agent != "Wszyscy":
+            filtered_data = data[data['Author'] == filter_agent]
+        else:
+            filtered_data = data
+        
+        # Pasek postępu
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-    if "Extract" not in data.columns or "Author" not in data.columns:
-        st.error("Plik musi zawierać kolumny 'Extract' i 'Author'.")
-        st.stop()
-
-    messages_to_check = data[["Extract", "Author"]].dropna().reset_index(drop=True)
-
-    st.success(f"✅ Załadowano {len(messages_to_check)} wiadomości do analizy.")
-
-    async def analyze_message(session, message):
-        prompt = (
-            "Jesteś Managerem Działu Obsługi Klienta w firmie Bookinghost. "
-            "Oceniasz jakość odpowiedzi agenta w wiadomości klienta. "
-            "Oceń jakość komunikacji w skali 1-5. Weź pod uwagę:\n"
-            "- empatię\n"
-            "- profesjonalizm\n"
-            "- spójność i zrozumiałość\n"
-            "- konkretność i przydatność odpowiedzi\n"
-            "- ton komunikacji zgodny z marką Bookinghost (ciepły, profesjonalny, proaktywny)\n\n"
-            "Zwróć tylko krótką ocenę w postaci:\n"
-            "Ocena: X/5\n"
-            "Uzasadnienie: • punkt 1\n• punkt 2"
-        )
-
-        try:
-            response = await session.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "gpt-4",
-                    "messages": [
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": message},
-                    ],
-                    "temperature": 0.3,
-                },
-                timeout=30
-            )
-            result = await response.json()
-            return result["choices"][0]["message"]["content"]
-        except Exception as e:
-            return f"Error: {e}"
-
-    async def process_messages():
+        # Start timera
+        start_time = time.time()
         results = []
-        async with aiohttp.ClientSession() as session:
-            tasks = [analyze_message(session, row["Extract"]) for _, row in messages_to_check.iterrows()]
-            results = await asyncio.gather(*tasks)
-        return results
 
-    if st.button("▶️ Rozpocznij analizę"):
-        start = time.time()
-        with st.spinner("Analiza w toku..."):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            feedbacks = loop.run_until_complete(process_messages())
-            loop.close()
-
-        data["Feedback"] = feedbacks
-
-        def extract_score(text):
+        # Przetwarzanie danych
+        for idx, row in enumerate(filtered_data.iterrows(), 1):
+            index, message_row = row
             try:
-                return int([line for line in text.splitlines() if "Ocena" in line][0].split(":")[1].split("/")[0])
-            except:
-                return None
+                result = asyncio.run(analyze_message_async(message_row))
+                results.append(result)
+            except Exception as e:
+                results.append({
+                    "Message ID": message_row.get("Message ID", ""),
+                    "Author": message_row.get("Author", ""),
+                    "Quality Score": "Error",
+                    "Feedback": f"Błąd analizy: {str(e)}",
+                    "Justification": ""
+                })
+            # Aktualizacja statusu
+            progress = idx / len(filtered_data)
+            progress_bar.progress(min(progress, 1.0))
+            status_text.text(f"Przetworzono wiadomości: {idx}/{len(filtered_data)}")
 
-        data["Score"] = data["Feedback"].apply(extract_score)
+        # Zakończenie timera
+        elapsed_time = time.time() - start_time
+        st.success(f"Analiza zakończona w {elapsed_time:.2f} sekundy.")
 
-        # Podsumowanie
-        summary = data.groupby("Author").agg(
-            Średnia_ocena=("Score", "mean"),
-            Liczba_wiadomości=("Score", "count")
-        ).sort_values(by="Średnia_ocena", ascending=False).reset_index()
+        # Prezentacja wyników
+        results_df = pd.DataFrame(results)
+        st.write(f"Podsumowanie analizy dla agenta {filter_agent}:")
+        st.dataframe(results_df)
 
-        team_avg = round(data["Score"].mean(), 2)
-        total_messages = len(data)
+        # Zapisz wyniki do CSV
+        st.download_button("Pobierz wyniki analizy", results_df.to_csv(index=False), "analiza_wiadomosci.csv", "text/csv")
 
-        st.subheader("📈 Podsumowanie zespołu")
-        st.metric("Średnia ocena zespołu", f"{team_avg}/5")
-        st.metric("Liczba sprawdzonych wiadomości", total_messages)
+        # Analiza zespołu
+        overall_feedback = "Zespół wykonuje zadania dobrze, ale warto zwrócić uwagę na poprawność językową i ton komunikacji."
+        st.write("Podsumowanie dla całego zespołu:")
+        st.write(overall_feedback)
 
-        st.subheader("👤 Wyniki poszczególnych agentów")
-        st.dataframe(summary, use_container_width=True)
-
-        # Insighty
-        st.subheader("🧠 Insighty i rekomendacje")
-        insights = (
-            "• Agentów z niższą średnią warto objąć dodatkowym mentoringiem.\n"
-            "• Wysoka jakość (4.5+): świadczy o dobrym tonie, empatii i konkretności.\n"
-            "• Częste problemy to: brak konkretu, zbyt techniczny język, brak propozycji rozwiązania.\n"
-            "• Rekomendacja: przygotować checklistę idealnej odpowiedzi oraz wdrożyć przegląd tygodniowy."
-        )
-        st.markdown(insights)
-
-        # Zapis CSV
-        now = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        csv_name = f"raport_jakosci_{now}.csv"
-        data.to_csv(csv_name, index=False)
-
-        st.download_button(
-            label="📥 Pobierz szczegółowy raport (CSV)",
-            data=data.to_csv(index=False).encode('utf-8'),
-            file_name=csv_name,
-            mime="text/csv"
-        )
-
-        end = time.time()
-        st.info(f"⏱️ Analiza zajęła {round(end - start, 2)} sekund.")
-
+    except Exception as e:
+        st.error(f"Błąd podczas przetwarzania pliku: {e}")
