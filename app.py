@@ -1,100 +1,120 @@
-import openai
 import streamlit as st
 import pandas as pd
-import asyncio
+from openai import OpenAI
 import time
 
-# Konfiguracja OpenAI API Key
-openai.api_key = st.text_input("Wprowadź swój API key OpenAI", type="password")
+st.set_page_config(page_title="Analiza jakości wiadomości – Bookinghost", layout="wide")
+st.title("📊 Narzędzie do analizy jakości obsługi klienta w Bookinghost")
 
-# Funkcja do analizy wiadomości
-async def analyze_message_async(message_row):
-    message = message_row.get('Extract', '')
-    author = message_row.get('Author', 'Unknown')
-    
-    # Wytyczne do analizy jakościowej
-    instructions = """
-    Jesteś menedżerem obsługi klienta w firmie Bookinghost i chcesz zapewnić, aby jakość komunikacji w Twoim zespole była jak najwyższa. Każda wiadomość, którą analizujesz, powinna być oceniona pod kątem profesjonalizmu, skuteczności, uprzedzeń i szybkości odpowiedzi.
-    Dodatkowo, pamiętaj, że analiza powinna brać pod uwagę poprawność językową, zgodność z procedurami oraz ton odpowiedzi, który musi być uprzedzająco pomocny.
-    """
+# 1. Klucz API
+api_key = st.text_input("🔑 Wklej swój OpenAI API Key", type="password")
+if not api_key:
+    st.warning("Wprowadź swój OpenAI API Key, aby rozpocząć.")
+    st.stop()
 
-    # Zlecenie analizy do modelu GPT-4 (lub innego modelu)
-    response = openai.completions.create(
-        model="gpt-4",  # Możesz zmienić model na odpowiedni (np. gpt-4, gpt-3.5-turbo)
-        prompt=f"{instructions}\n\nMessage: {message}",
-        max_tokens=1000,
-        temperature=0.7
-    )
+# 2. Wczytanie pliku CSV
+uploaded_file = st.file_uploader("📁 Wgraj plik CSV (separator `;`)", type=["csv"])
+if not uploaded_file:
+    st.stop()
 
-    quality_score = response['choices'][0]['text'].strip()
-    return {
-        "Message ID": message_row.get('Message ID', ''),
-        "Author": author,
-        "Quality Score": quality_score,
-        "Feedback": "Analiza zakończona",
-        "Justification": "Model ocenił jakość komunikacji na podstawie podanych wytycznych."
-    }
+try:
+    df = pd.read_csv(uploaded_file, sep=";", encoding="utf-8", on_bad_lines="skip")
+except Exception as e:
+    st.error(f"Błąd podczas wczytywania pliku CSV:\n{e}")
+    st.stop()
 
-# Interfejs użytkownika w Streamlit
-st.title("Narzędzie do analizy jakości obsługi klienta w Bookinghost")
+if "Author" not in df.columns or "Extract" not in df.columns:
+    st.error("Plik musi zawierać kolumny `'Author'` i `'Extract'`.")
+    st.stop()
 
-# Wczytywanie pliku CSV
-uploaded_file = st.file_uploader("Załaduj plik CSV", type=["csv"])
-if uploaded_file:
+# 3. Inicjalizacja klienta OpenAI
+client = OpenAI(api_key=api_key)
+
+# 4. Opcjonalny filtr po agencie
+agents = ["Wszyscy"] + sorted(df["Author"].dropna().unique().tolist())
+selected = st.selectbox("👤 Wybierz agenta", agents)
+if selected != "Wszyscy":
+    df = df[df["Author"] == selected]
+
+# 5. Limit wiadomości (opcjonalnie)
+max_n = st.slider("🔢 Maksymalna liczba wiadomości do analizy", 10, min(1000, len(df)), 100)
+df = df.head(max_n)
+
+# 6. Przygotowanie do pętli analizy
+progress = st.progress(0)
+status = st.empty()
+results = []
+
+system_prompt = (
+    "Jesteś Menedżerem Customer Service w Bookinghost. Twoim zadaniem jest "
+    "ocenić, w skali 1–5, jakość odpowiedzi agenta na przesłaną wiadomość. "
+    "Weź pod uwagę:\n"
+    "- empatię i uprzejmość\n"
+    "- poprawność językową\n"
+    "- zgodność z procedurami i wiedzą produktową\n"
+    "- ton komunikacji (ciepły, profesjonalny, proaktywny)\n\n"
+    "Twoja odpowiedź powinna zawierać:\n"
+    "Ocena: X/5\n"
+    "Uzasadnienie: • punkt 1\n• punkt 2"
+)
+
+# 7. Pętla analizująca wiadomości
+start = time.time()
+for i, row in enumerate(df.itertuples(index=False), 1):
     try:
-        # Wczytanie pliku z uwzględnieniem separatora i błędnych linii
-        data = pd.read_csv(uploaded_file, sep=';', encoding='utf-8', on_bad_lines='skip')
-        
-        # Przefiltrowanie danych (opcjonalnie, np. wybór agenta)
-        filter_agent = st.selectbox("Wybierz agenta", options=["Wszyscy"] + list(data['Author'].unique()))
-        if filter_agent != "Wszyscy":
-            filtered_data = data[data['Author'] == filter_agent]
-        else:
-            filtered_data = data
-        
-        # Pasek postępu
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
-        # Start timera
-        start_time = time.time()
-        results = []
-
-        # Przetwarzanie danych
-        for idx, row in enumerate(filtered_data.iterrows(), 1):
-            index, message_row = row
-            try:
-                result = asyncio.run(analyze_message_async(message_row))
-                results.append(result)
-            except Exception as e:
-                results.append({
-                    "Message ID": message_row.get("Message ID", ""),
-                    "Author": message_row.get("Author", ""),
-                    "Quality Score": "Error",
-                    "Feedback": f"Błąd analizy: {str(e)}",
-                    "Justification": ""
-                })
-            # Aktualizacja statusu
-            progress = idx / len(filtered_data)
-            progress_bar.progress(min(progress, 1.0))
-            status_text.text(f"Przetworzono wiadomości: {idx}/{len(filtered_data)}")
-
-        # Zakończenie timera
-        elapsed_time = time.time() - start_time
-        st.success(f"Analiza zakończona w {elapsed_time:.2f} sekundy.")
-
-        # Prezentacja wyników
-        results_df = pd.DataFrame(results)
-        st.write(f"Podsumowanie analizy dla agenta {filter_agent}:")
-        st.dataframe(results_df)
-
-        # Zapisz wyniki do CSV
-        st.download_button("Pobierz wyniki analizy", results_df.to_csv(index=False), "analiza_wiadomosci.csv", "text/csv")
-
-        # Analiza zespołu
-        overall_feedback = "Zespół wykonuje zadania dobrze, ale warto zwrócić uwagę na poprawność językową i ton komunikacji."
-        st.write("Podsumowanie dla całego zespołu:")
-        st.write(overall_feedback)
-
+        resp = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": row.Extract}
+            ],
+            temperature=0.3,
+        )
+        feedback = resp.choices[0].message.content.strip()
     except Exception as e:
-        st.error(f"Błąd podczas przetwarzania pliku: {e}")
+        feedback = f"Błąd analizy: {e}"
+
+    results.append({
+        "Author": row.Author,
+        "Extract": row.Extract,
+        "Feedback": feedback
+    })
+
+    progress.progress(i / len(df))
+    status.text(f"Przetworzono wiadomości: {i}/{len(df)}")
+
+elapsed = time.time() - start
+st.success(f"✅ Analiza zakończona w {elapsed:.1f} s")
+
+# 8. Zapis wyników i prezentacja
+res_df = pd.DataFrame(results)
+
+# Wyciągnięcie ocen liczbowych
+def parse_score(txt):
+    for ln in txt.splitlines():
+        if ln.lower().startswith("ocena"):
+            try:
+                return float(ln.split(":")[1].split("/")[0].strip())
+            except:
+                pass
+    return None
+
+res_df["Score"] = res_df["Feedback"].apply(parse_score)
+
+st.subheader("📈 Raport zbiorczy")
+team_avg = res_df["Score"].mean()
+st.metric("Średnia ocena zespołu", f"{team_avg:.2f}/5")
+st.metric("Liczba analizowanych wiadomości", len(res_df))
+
+st.subheader("👤 Wyniki poszczególnych agentów")
+agent_summary = (
+    res_df.groupby("Author")
+          .agg(Średnia_ocena=("Score", "mean"), Liczba=("Score", "count"))
+          .sort_values("Średnia_ocena", ascending=False)
+          .reset_index()
+)
+st.dataframe(agent_summary.style.format({"Średnia_ocena": "{:.2f}"}), use_container_width=True)
+
+st.subheader("📥 Pobierz pełen raport (CSV)")
+csv_data = res_df.to_csv(index=False, sep=";").encode("utf-8")
+st.download_button("⬇️ Pobierz CSV", data=csv_data, file_name="raport_quality.csv", mime="text/csv")
