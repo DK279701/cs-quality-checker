@@ -1,81 +1,49 @@
 import streamlit as st
 import pandas as pd
-import datetime
-from openai import OpenAI
+import openai
+import time
 
-# Konfiguracja strony
-st.set_page_config(page_title="CS Quality Checker (ChatGPT)", layout="centered")
-st.title("🔍 CS Quality Checker (ChatGPT)")
+# ⚡️ Wprowadzenie API Key (nie zapisuje tego!)
+openai_api_key = st.text_input("Wklej swój OpenAI API Key", type="password")
 
-# Wprowadzenie tokena OpenAI
-openai_api_key = st.text_input("🔑 Wprowadź swój OpenAI API Key", type="password")
-if not openai_api_key:
-    st.warning("Proszę wprowadzić swój OpenAI API Key.")
-    st.stop()
+# Ὄ2 Wczytanie pliku CSV
+st.title("💼 System oceny jakości i produktywności agentów Bookinghost")
+uploaded_file = st.file_uploader("Wgraj plik CSV z Front (dane wiadomości)", type="csv")
 
-# Inicjalizacja klienta OpenAI
-client = OpenAI(api_key=openai_api_key)
+if uploaded_file and openai_api_key:
+    df = pd.read_csv(uploaded_file)
 
-# Wgrywanie pliku z bazą wiedzy
-uploaded_file = st.file_uploader("📄 Wgraj plik z bazą wiedzy (txt lub md)", type=["txt", "md"])
-if uploaded_file is not None:
-    try:
-        kb = uploaded_file.read().decode("utf-8")
-    except Exception as e:
-        st.error(f"Błąd podczas odczytu pliku: {e}")
-        st.stop()
-else:
-    kb = ""
-
-# Wprowadzenie wiadomości agenta
-msg = st.text_area("💬 Wprowadź wiadomość agenta", height=150)
-
-# Przycisk do analizy
-if st.button("🧪 Sprawdź jakość"):
-    if not kb.strip():
-        st.warning("Proszę wgrać plik z bazą wiedzy przed analizą.")
-    elif not msg.strip():
-        st.warning("Proszę wprowadzić wiadomość agenta.")
+    if 'Author' not in df.columns or 'Extract' not in df.columns:
+        st.error("Brakuje kolumny 'Author' lub 'Extract' w pliku CSV")
     else:
-        # Tworzenie promptu dla ChatGPT
-        prompt = (
-            "Jesteś ekspertem ds. jakości w obsłudze klienta. "
-            "Na podstawie poniższej bazy wiedzy oceń, czy wiadomość agenta jest zgodna z procedurami. "
-            "Zwróć uwagę na ton, profesjonalizm i kompletność odpowiedzi.\n\n"
-            f"Baza wiedzy:\n{kb}\n\n"
-            f"Wiadomość agenta:\n{msg}\n\n"
-            "Odpowiedz po polsku."
-        )
+        st.success("Plik poprawnie wczytany! Rozpoczynam ocenianie wiadomości...")
 
-        try:
-            # Wywołanie API OpenAI
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "Jesteś pomocnym asystentem."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            out = response.choices[0].message.content
-            st.markdown("### ✅ Wynik analizy")
-            st.write(out)
-        except Exception as e:
-            st.error(f"Błąd podczas wywołania API OpenAI: {e}")
-            out = ""
+        results = []
+        for idx, row in df.iterrows():
+            message = row['Extract']
+            author = row['Author']
+            try:
+                response = openai.ChatCompletion.create(
+                    model="gpt-4",
+                    api_key=openai_api_key,
+                    messages=[
+                        {"role": "system", "content": "Jesteś ekspertem ds. jakości obsługi klienta Bookinghost. Oceń poniższą wiadomość według standardów firmy. Odpowiedz TYLKO TAK lub NIE oraz uzasadnij ocenę."},
+                        {"role": "user", "content": message}
+                    ]
+                )
+                gpt_answer = response.choices[0].message.content
+            except Exception as e:
+                gpt_answer = f"Błąd: {e}"
 
-        # Zapis historii
-        history = st.session_state.get("history", [])
-        history.append({
-            "Czas": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Wiadomość": msg,
-            "Analiza": out
-        })
-        st.session_state.history = history
+            results.append({
+                "Author": author,
+                "Extract": message,
+                "GPT-ocena": gpt_answer
+            })
+            time.sleep(1.2)  # uniknij przekroczenia limitu API
 
-# Wyświetlenie historii i możliwość pobrania
-if st.session_state.get("history"):
-    st.markdown("---")
-    df = pd.DataFrame(st.session_state.history)
-    st.dataframe(df)
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("📥 Pobierz historię CSV", csv, "historia.csv", "text/csv")
+        result_df = pd.DataFrame(results)
+        st.dataframe(result_df)
+
+        csv = result_df.to_csv(index=False).encode('utf-8')
+        st.download_button("🔧 Pobierz wyniki jako CSV", data=csv, file_name="ocena_jakosci.csv", mime='text/csv')
