@@ -20,9 +20,9 @@ if api_key and uploaded_file:
         encoding = st.text_input("Podaj kodowanie pliku (np. 'utf-8')", "utf-8")
         sep = st.text_input("Podaj separator pliku (np. ',' lub ';')", ",")
 
-        # Wczytanie danych z pliku CSV
+        # Wczytanie danych z pliku CSV z nową obsługą błędnych wierszy
         try:
-            data = pd.read_csv(uploaded_file, encoding=encoding, sep=sep, error_bad_lines=False)
+            data = pd.read_csv(uploaded_file, encoding=encoding, sep=sep, on_bad_lines='skip')
             st.success("Plik załadowany – rozpoczynam analizę...")
         except Exception as e:
             st.error(f"Błąd podczas ładowania pliku CSV: {str(e)}")
