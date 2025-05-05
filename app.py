@@ -28,11 +28,6 @@ if api_key and uploaded_file:
         # Oczyszczanie nazw kolumn z ewentualnych białych znaków
         data.columns = data.columns.str.strip()
 
-        # Sprawdzamy dostępne kolumny w pliku CSV
-        if 'Message date' not in data.columns:
-            st.error(f"Kolumna 'Message date' nie została znaleziona w pliku. Dostępne kolumny to: {', '.join(data.columns)}")
-            st.stop()
-
         # Filtrowanie danych po agencie
         if filter_agent != "Wszyscy":
             data = data[data['Author'] == filter_agent]
