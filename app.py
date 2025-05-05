@@ -1,121 +1,113 @@
 import streamlit as st
 import pandas as pd
 import openai
+import time
 import asyncio
 import aiohttp
-import time
 from datetime import datetime
-import os
 
-# Klucz API
-openai.api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
+st.set_page_config(page_title="Analiza jakości wiadomości", layout="wide")
+st.title("📊 Narzędzie do analizy jakości wiadomości")
 
-st.set_page_config(page_title="CS Quality Checker", layout="wide")
-st.title("📊 Narzędzie do analizy jakości wiadomości – Bookinghost")
+# API key
+api_key = st.text_input("🔑 Wprowadź swój OpenAI API Key", type="password")
+if not api_key:
+    st.warning("⚠️ Wprowadź swój OpenAI API Key, aby rozpocząć analizę.")
+    st.stop()
 
-uploaded_file = st.file_uploader("📎 Wgraj plik CSV", type=["csv"])
+openai.api_key = api_key
 
-if uploaded_file is not None:
+uploaded_file = st.file_uploader("📎 Wgraj plik CSV z wiadomościami", type=["csv"])
+
+if not uploaded_file:
+    st.info("Wgraj plik CSV, aby rozpocząć.")
+    st.stop()
+
+# Wczytanie pliku CSV z obsługą błędów
+try:
+    df = pd.read_csv(uploaded_file, sep=";", encoding="utf-8")
+except Exception as e:
+    st.error(f"Błąd podczas wczytywania pliku CSV: {e}")
+    st.stop()
+
+if 'Extract' not in df.columns or 'Author' not in df.columns:
+    st.error("Plik CSV musi zawierać kolumny: 'Extract' oraz 'Author'")
+    st.stop()
+
+# Wybranie zakresu analizy
+agents = sorted(df['Author'].dropna().unique())
+selected_agent = st.selectbox("👤 Wybierz agenta do analizy (lub 'Wszyscy')", options=["Wszyscy"] + list(agents))
+
+if selected_agent != "Wszyscy":
+    df = df[df['Author'] == selected_agent]
+
+# Limit wiadomości do analizy (np. dla testów)
+max_messages = st.slider("🔢 Maksymalna liczba wiadomości do analizy", 10, 1000, 50)
+df = df.head(max_messages)
+
+messages = df['Extract'].fillna("").tolist()
+authors = df['Author'].fillna("Nieznany").tolist()
+
+# Prompt + analiza
+system_prompt = (
+    "Jesteś Managerem Customer Service w firmie Bookinghost. "
+    "Twoim zadaniem jest ocenić jakość wiadomości wysyłanych przez zespół obsługi klienta. "
+    "Skup się na uprzejmości, poprawności językowej, trafności odpowiedzi i zgodności z wiedzą firmową. "
+    "Twoja odpowiedź powinna być zwięzła i zawierać:\n"
+    "- Ogólną ocenę jakości (np. skala 1–5 lub opisowa)\n"
+    "- Argumentację tej oceny\n"
+    "- Bulletpointy z szybkim feedbackiem"
+)
+
+async def analyze_message(session, message, author):
     try:
-        # Wczytaj plik CSV z domyślnym separatorem ";"
-        data = pd.read_csv(uploaded_file, sep=";")
-        st.success("✅ Plik wczytany poprawnie.")
+        headers = {"Authorization": f"Bearer {api_key}"}
+        payload = {
+            "model": "gpt-4",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Oceń poniższą wiadomość pracownika '{author}':\n\n{message}"}
+            ],
+            "temperature": 0.4,
+        }
+        async with session.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload) as resp:
+            response = await resp.json()
+            return response["choices"][0]["message"]["content"]
     except Exception as e:
-        st.error(f"❌ Błąd podczas wczytywania pliku CSV: {e}")
-        st.stop()
+        return f"Błąd analizy: {e}"
 
-    # Sprawdzenie wymaganych kolumn
-    if "Author" not in data.columns or "Extract" not in data.columns:
-        st.error("❌ Plik musi zawierać kolumny 'Author' oraz 'Extract'.")
-        st.stop()
+async def run_analysis():
+    async with aiohttp.ClientSession() as session:
+        tasks = [analyze_message(session, msg, auth) for msg, auth in zip(messages, authors)]
+        return await asyncio.gather(*tasks)
 
-    st.write("🧠 Trwa analiza jakości wiadomości...")
+if st.button("▶️ Rozpocznij analizę"):
+    with st.spinner("Analizuję wiadomości..."):
+        start_time = time.time()
+        results = asyncio.run(run_analysis())
+        elapsed = round(time.time() - start_time, 2)
 
-    start_time = time.time()
+        df["Ocena jakości"] = results
+        st.success(f"✅ Analiza zakończona w {elapsed} sekundy")
 
-    messages = data[["Author", "Extract"]].dropna()
-    messages = messages[messages["Extract"].str.strip().astype(bool)]
+        # Podsumowanie zespołu
+        st.subheader("📈 Raport zbiorczy")
+        summary = df.groupby("Author")["Ocena jakości"].apply(lambda x: f"{len(x)} wiadomości").reset_index(name="Liczba wiadomości")
+        st.dataframe(summary)
 
-    async def analyze_message(session, author, message):
-        system_prompt = (
-            "Jesteś Managerem Customer Service w Bookinghost. Twoim zadaniem jest ocenić jakość wiadomości wysłanej przez agenta. "
-            "Skup się na tonie, poprawności, jasności przekazu, oraz przydatności dla gościa. "
-            "Zwróć feedback w formie krótkich punktów. Na końcu dodaj ocenę (1-5) wraz z krótkim uzasadnieniem."
+        # Pobranie wyników
+        st.subheader("📤 Pobierz wyniki")
+        st.download_button(
+            label="📥 Pobierz CSV z ocenami",
+            data=df.to_csv(index=False, sep=";").encode("utf-8"),
+            file_name="analiza_wiadomosci.csv",
+            mime="text/csv"
         )
 
-        prompt = f"Wiadomość od agenta:\n\"\"\"\n{message}\n\"\"\"\n\n"
-
-        try:
-            response = await session.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {openai.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "gpt-4",
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.4,
-                    "max_tokens": 400
-                },
-                timeout=30,
-            )
-            result = await response.json()
-            content = result["choices"][0]["message"]["content"]
-            return {"author": author, "message": message, "feedback": content}
-        except Exception as e:
-            return {"author": author, "message": message, "feedback": f"Błąd: {e}"}
-
-    async def run_analysis():
-        tasks = []
-        async with aiohttp.ClientSession() as session:
-            for _, row in messages.iterrows():
-                tasks.append(analyze_message(session, row["Author"], row["Extract"]))
-            return await asyncio.gather(*tasks)
-
-    feedbacks = asyncio.run(run_analysis())
-
-    # Przekształcenie wyników do DataFrame
-    feedback_df = pd.DataFrame(feedbacks)
-
-    # Wyciąganie ocen (1-5) z feedbacków
-    def extract_score(feedback):
-        for line in feedback.splitlines():
-            if any(c.isdigit() for c in line):
-                for token in line.split():
-                    if token.isdigit() and 1 <= int(token) <= 5:
-                        return int(token)
-        return None
-
-    feedback_df["Score"] = feedback_df["feedback"].apply(extract_score)
-
-    # Raport zbiorczy
-    st.header("📋 Raport zespołu")
-
-    team_summary = feedback_df.groupby("author").agg(
-        Średnia_ocena=("Score", "mean"),
-        Liczba_wiadomości=("Score", "count")
-    ).sort_values(by="Średnia_ocena", ascending=False)
-
-    st.dataframe(team_summary.style.format({"Średnia_ocena": "{:.2f}"}))
-
-    st.download_button("⬇️ Pobierz pełny raport (CSV)", data=feedback_df.to_csv(index=False), file_name="raport_jakosci.csv", mime="text/csv")
-
-    st.header("📌 Podsumowanie ogólne")
-    avg_score = feedback_df["Score"].mean()
-    st.markdown(f"**Średnia ocena zespołu:** `{avg_score:.2f}` / 5")
-
-    st.markdown("🔎 Wnioski (propozycja oparta o średnie oceny):")
-    if avg_score >= 4.5:
-        st.success("Zespół działa bardzo dobrze. Zachowajcie aktualne standardy!")
-    elif avg_score >= 3.5:
-        st.warning("Jakość jest dobra, ale są obszary do poprawy.")
-    else:
-        st.error("Jakość wymaga pilnej poprawy. Wskazane dodatkowe szkolenia i korekta stylu komunikacji.")
-
-    end_time = time.time()
-    elapsed = end_time - start_time
-    st.info(f"⏱️ Czas analizy: {elapsed:.2f} sekund")
+        # Szczegóły analizy
+        st.subheader("📝 Szczegółowa analiza wiadomości")
+        for idx, row in df.iterrows():
+            st.markdown(f"**Agent:** {row['Author']}")
+            st.markdown(f"**Wiadomość:** {row['Extract']}")
+            st.markdown(f"**Ocena:**\n{row['Ocena jakości']}")
+            st.markdown("---")
