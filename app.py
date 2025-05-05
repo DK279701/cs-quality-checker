@@ -107,3 +107,5 @@ if api_key and uploaded_file:
 
     except Exception as e:
         st.error(f"Błąd podczas przetwarzania pliku: {str(e)}")
+else:
+    st.warning("Proszę wprowadzić API Key oraz wgrać plik CSV.")
