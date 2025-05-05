@@ -1,93 +1,121 @@
 import streamlit as st
 import pandas as pd
-from openai import OpenAI
+import openai
+import asyncio
+import aiohttp
 import time
+from datetime import datetime
+import os
 
-st.title("System premiowy – analiza jakości wiadomości (GPT-4)")
+# Klucz API
+openai.api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
 
-api_key = st.text_input("Wklej swój OpenAI API Key", type="password")
-uploaded_file = st.file_uploader("Wgraj plik CSV z danymi z Front", type="csv")
+st.set_page_config(page_title="CS Quality Checker", layout="wide")
+st.title("📊 Narzędzie do analizy jakości wiadomości – Bookinghost")
 
-# Filtrowanie wiadomości po agencie
-filter_agent = st.selectbox("Wybierz agenta", options=["Wszyscy"])
+uploaded_file = st.file_uploader("📎 Wgraj plik CSV", type=["csv"])
 
-if api_key and uploaded_file:
+if uploaded_file is not None:
     try:
-        # Wczytywanie CSV z domyślnym kodowaniem i separatorem ";"
-        try:
-            data = pd.read_csv(uploaded_file, encoding='utf-8', sep=';', on_bad_lines='skip')
-            st.success("Plik załadowany – rozpoczynam analizę...")
-        except Exception as e:
-            st.error(f"Błąd podczas ładowania pliku CSV: {str(e)}")
-            st.stop()
-
-        # Czyszczenie nazw kolumn z białych znaków
-        data.columns = data.columns.str.strip()
-
-        # Filtrowanie danych po agencie
-        if filter_agent != "Wszyscy":
-            data = data[data['Author'] == filter_agent]
-
-        # Konfiguracja API OpenAI
-        client = OpenAI(api_key=api_key)
-
-        progress = st.progress(0)
-        status = st.empty()
-        results = []
-        agents_feedback = {}
-
-        for i, row in enumerate(data.itertuples()):
-            agent = getattr(row, "Author", "")
-            message = getattr(row, "Extract", "")
-            msg_id = getattr(row, "Message ID", "")
-
-            if not message or pd.isna(message):
-                continue
-
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[
-                        {"role": "system", "content": "Jesteś Managerem Customer Service w Bookinghost. Chcę, aby jakość usług mojego zespołu była jak najwyższa. Oceń jakość wiadomości agenta pod kątem poprawności, zgodności z procedurami, tonu komunikacji oraz jak oceniłbyś ogólną jakość tej wiadomości."},
-                        {"role": "user", "content": f"Wiadomość agenta: {message}"}
-                    ],
-                    temperature=0.3
-                )
-                feedback = response.choices[0].message.content
-            except Exception as e:
-                feedback = f"Błąd: {str(e)}"
-
-            results.append({
-                "Message ID": msg_id,
-                "Agent": agent,
-                "Original Message": message,
-                "GPT Feedback": feedback
-            })
-
-            if agent not in agents_feedback:
-                agents_feedback[agent] = []
-            agents_feedback[agent].append(feedback)
-
-            status.text(f"Analizuję wiadomość {i + 1} z {len(data)}")
-            progress.progress((i + 1) / len(data))
-
-        st.success("Analiza zakończona!")
-
-        # Raport z wynikami
-        results_df = pd.DataFrame(results)
-        st.dataframe(results_df)
-
-        csv_download = results_df.to_csv(index=False).encode("utf-8")
-        st.download_button("Pobierz wyniki jako CSV", csv_download, "analiza.csv", "text/csv")
-
-        # Feedback ogólny (po agencie)
-        st.subheader("Podsumowanie analizy zespołu")
-        for agent, feedbacks in agents_feedback.items():
-            st.markdown(f"### {agent}")
-            summarized_feedback = "\n".join(f"- {f}" for f in feedbacks[:3])  # Pokazujemy tylko pierwsze 3 wpisy
-            st.text_area(f"Feedback dla {agent}", summarized_feedback, height=150)
-
+        # Wczytaj plik CSV z domyślnym separatorem ";"
+        data = pd.read_csv(uploaded_file, sep=";")
+        st.success("✅ Plik wczytany poprawnie.")
     except Exception as e:
-        st.error(f"Błąd podczas przetwarzania pliku: {str(e)}")
-else:
-    st.warning("Proszę wprowadzić API Key oraz wgrać plik CSV.")
+        st.error(f"❌ Błąd podczas wczytywania pliku CSV: {e}")
+        st.stop()
+
+    # Sprawdzenie wymaganych kolumn
+    if "Author" not in data.columns or "Extract" not in data.columns:
+        st.error("❌ Plik musi zawierać kolumny 'Author' oraz 'Extract'.")
+        st.stop()
+
+    st.write("🧠 Trwa analiza jakości wiadomości...")
+
+    start_time = time.time()
+
+    messages = data[["Author", "Extract"]].dropna()
+    messages = messages[messages["Extract"].str.strip().astype(bool)]
+
+    async def analyze_message(session, author, message):
+        system_prompt = (
+            "Jesteś Managerem Customer Service w Bookinghost. Twoim zadaniem jest ocenić jakość wiadomości wysłanej przez agenta. "
+            "Skup się na tonie, poprawności, jasności przekazu, oraz przydatności dla gościa. "
+            "Zwróć feedback w formie krótkich punktów. Na końcu dodaj ocenę (1-5) wraz z krótkim uzasadnieniem."
+        )
+
+        prompt = f"Wiadomość od agenta:\n\"\"\"\n{message}\n\"\"\"\n\n"
+
+        try:
+            response = await session.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openai.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.4,
+                    "max_tokens": 400
+                },
+                timeout=30,
+            )
+            result = await response.json()
+            content = result["choices"][0]["message"]["content"]
+            return {"author": author, "message": message, "feedback": content}
+        except Exception as e:
+            return {"author": author, "message": message, "feedback": f"Błąd: {e}"}
+
+    async def run_analysis():
+        tasks = []
+        async with aiohttp.ClientSession() as session:
+            for _, row in messages.iterrows():
+                tasks.append(analyze_message(session, row["Author"], row["Extract"]))
+            return await asyncio.gather(*tasks)
+
+    feedbacks = asyncio.run(run_analysis())
+
+    # Przekształcenie wyników do DataFrame
+    feedback_df = pd.DataFrame(feedbacks)
+
+    # Wyciąganie ocen (1-5) z feedbacków
+    def extract_score(feedback):
+        for line in feedback.splitlines():
+            if any(c.isdigit() for c in line):
+                for token in line.split():
+                    if token.isdigit() and 1 <= int(token) <= 5:
+                        return int(token)
+        return None
+
+    feedback_df["Score"] = feedback_df["feedback"].apply(extract_score)
+
+    # Raport zbiorczy
+    st.header("📋 Raport zespołu")
+
+    team_summary = feedback_df.groupby("author").agg(
+        Średnia_ocena=("Score", "mean"),
+        Liczba_wiadomości=("Score", "count")
+    ).sort_values(by="Średnia_ocena", ascending=False)
+
+    st.dataframe(team_summary.style.format({"Średnia_ocena": "{:.2f}"}))
+
+    st.download_button("⬇️ Pobierz pełny raport (CSV)", data=feedback_df.to_csv(index=False), file_name="raport_jakosci.csv", mime="text/csv")
+
+    st.header("📌 Podsumowanie ogólne")
+    avg_score = feedback_df["Score"].mean()
+    st.markdown(f"**Średnia ocena zespołu:** `{avg_score:.2f}` / 5")
+
+    st.markdown("🔎 Wnioski (propozycja oparta o średnie oceny):")
+    if avg_score >= 4.5:
+        st.success("Zespół działa bardzo dobrze. Zachowajcie aktualne standardy!")
+    elif avg_score >= 3.5:
+        st.warning("Jakość jest dobra, ale są obszary do poprawy.")
+    else:
+        st.error("Jakość wymaga pilnej poprawy. Wskazane dodatkowe szkolenia i korekta stylu komunikacji.")
+
+    end_time = time.time()
+    elapsed = end_time - start_time
+    st.info(f"⏱️ Czas analizy: {elapsed:.2f} sekund")
