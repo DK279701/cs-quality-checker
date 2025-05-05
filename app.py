@@ -8,9 +8,6 @@ st.title("System premiowy – analiza jakości wiadomości (GPT-4)")
 api_key = st.text_input("Wklej swój OpenAI API Key", type="password")
 uploaded_file = st.file_uploader("Wgraj plik CSV z danymi z Front", type="csv")
 
-# Filtrowanie wiadomości po dacie
-filter_date = st.date_input("Wybierz datę początkową", min_value=pd.to_datetime('2020-01-01'))
-
 # Filtrowanie wiadomości po agencie
 filter_agent = st.selectbox("Wybierz agenta", options=["Wszyscy"])
 
@@ -39,11 +36,6 @@ if api_key and uploaded_file:
         # Filtrowanie danych po agencie
         if filter_agent != "Wszyscy":
             data = data[data['Author'] == filter_agent]
-
-        if filter_date:
-            # Konwersja kolumny 'Message date' na datetime
-            data['Message date'] = pd.to_datetime(data['Message date'], errors='coerce')
-            data = data[data['Message date'] >= pd.to_datetime(filter_date)]
 
         # Konfiguracja API OpenAI
         client = OpenAI(api_key=api_key)
