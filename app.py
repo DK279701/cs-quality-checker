@@ -41,17 +41,24 @@ def fetch_all_messages(token, inbox):
     # 2) fetch messages for each conversation
     records = []
     for c in convs:
-        conv_id = c.get("id")
+        conv_id = c.get("id", "")
         r2 = requests.get(f"{url}/{conv_id}/messages", headers=headers)
         r2.raise_for_status()
         for m in r2.json().get("_results", []):
-            author = m.get("author", {}).get("handle", "Unknown")
+            # bezpieczne pobranie autora
+            raw_author = m.get("author")
+            if isinstance(raw_author, dict):
+                author = raw_author.get("handle", "Unknown")
+            else:
+                author = str(raw_author) if raw_author else "Unknown"
+
             body   = m.get("body", "")
             ct_raw = m.get("created_at", "")
             try:
                 created = parse_date(ct_raw) if ct_raw else None
             except:
                 created = None
+
             records.append({
                 "Conversation ID": conv_id,
                 "Message ID":      m.get("id", ""),
@@ -117,10 +124,9 @@ if st.sidebar.button("▶️ POBIERZ WSZYSTKIE WIADOMOŚCI"):
             "temperature": 0.3,
             "max_tokens": 200
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(API_URL, headers=HEADERS, json=payload) as resp:
-                js = await resp.json()
-                return js["choices"][0]["message"]["content"].strip()
+        async with session.post(API_URL, headers=HEADERS, json=payload) as resp:
+            js = await resp.json()
+            return js["choices"][0]["message"]["content"].strip()
 
     async def run_all(recs, prog, stat):
         out = []
