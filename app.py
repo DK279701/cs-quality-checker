@@ -4,11 +4,10 @@ import requests
 import aiohttp
 import asyncio
 import time
-from datetime import datetime
 from dateutil.parser import parse as parse_date
 
 st.set_page_config(page_title="CS Quality Checker – Bookinghost", layout="wide")
-st.title("📥 Pobieranie i analiza wiadomości z Front (bez filtra API)")
+st.title("📥 Pobieranie i analiza wiadomości z Front")
 
 # ——— SIDEBAR: FRONT API —————————————————————————
 st.sidebar.header("🔗 Ustawienia Front API")
@@ -26,7 +25,7 @@ def fetch_all_messages(token, inbox):
     params = {"inbox_id": inbox, "page_size": 100} if inbox else {"page_size":100}
     url = "https://api2.frontapp.com/conversations"
 
-    # 1) fetch conversations (paginated)
+    # fetch conversations (paginated)
     convs = []
     while True:
         r = requests.get(url, headers=headers, params=params)
@@ -38,57 +37,34 @@ def fetch_all_messages(token, inbox):
             break
         params["cursor"] = cursor
 
-    # 2) fetch messages for each conversation
+    # fetch messages for each conversation
     records = []
     for c in convs:
         conv_id = c.get("id", "")
         r2 = requests.get(f"{url}/{conv_id}/messages", headers=headers)
         r2.raise_for_status()
         for m in r2.json().get("_results", []):
-            # bezpieczne pobranie autora
+            # bezpiecznie pobieramy autora
             raw_author = m.get("author")
             if isinstance(raw_author, dict):
                 author = raw_author.get("handle", "Unknown")
             else:
                 author = str(raw_author) if raw_author else "Unknown"
 
-            body   = m.get("body", "")
-            ct_raw = m.get("created_at", "")
-            try:
-                created = parse_date(ct_raw) if ct_raw else None
-            except:
-                created = None
-
+            body = m.get("body", "")
             records.append({
                 "Conversation ID": conv_id,
                 "Message ID":      m.get("id", ""),
                 "Author":          author,
-                "Extract":         body,
-                "Created At":      created
+                "Extract":         body
             })
     return pd.DataFrame(records)
 
-if st.sidebar.button("▶️ POBIERZ WSZYSTKIE WIADOMOŚCI"):
+if st.sidebar.button("▶️ POBIERZ I ANALIZUJ WSZYSTKIE WIADOMOŚCI"):
     with st.spinner("⏳ Pobieranie…"):
         df = fetch_all_messages(api_token, inbox_id or None)
-    st.success(f"Pobrano {len(df)} wiadomości (bez filtra).")
-    st.write("#### Pierwsze 10 rekordów z kolumną `Created At`")
+    st.success(f"Pobrano {len(df)} wiadomości.")
     st.dataframe(df.head(10))
-
-    # ——— WYBÓR ZAKRESU DAT ——————————————————————
-    st.sidebar.header("📅 Filtr po dacie wiadomości")
-    min_date = df["Created At"].min().date()
-    max_date = df["Created At"].max().date()
-    start_date = st.sidebar.date_input("Start", value=min_date, min_value=min_date, max_value=max_date)
-    end_date   = st.sidebar.date_input("Koniec", value=max_date, min_value=min_date, max_value=max_date)
-
-    mask = df["Created At"].between(
-        datetime.combine(start_date, datetime.min.time()),
-        datetime.combine(end_date,   datetime.max.time())
-    )
-    filtered = df[mask].reset_index(drop=True)
-    st.write(f"Po filtrze: **{len(filtered)}** wiadomości z zakresu {start_date} ↔ {end_date}")
-    st.dataframe(filtered.head(10))
 
     # ——— USTAWIENIA OPENAI ————————————————————
     openai_key = st.sidebar.text_input("🗝️ OpenAI API Key", type="password")
@@ -142,7 +118,7 @@ if st.sidebar.button("▶️ POBIERZ WSZYSTKIE WIADOMOŚCI"):
                 stat.text(f"Przetworzono: {done}/{len(recs)}")
         return out
 
-    recs = filtered.to_dict(orient="records")
+    recs = df.to_dict(orient="records")
     prog = st.progress(0.0)
     stat = st.empty()
     start = time.time()
@@ -150,7 +126,7 @@ if st.sidebar.button("▶️ POBIERZ WSZYSTKIE WIADOMOŚCI"):
         feedbacks = asyncio.run(run_all(recs, prog, stat))
     st.success(f"✅ Zakończono w {time.time() - start:.1f}s")
 
-    filtered["Feedback"] = feedbacks
+    df["Feedback"] = feedbacks
     def parse_score(txt):
         for l in txt.splitlines():
             if l.lower().startswith("ocena"):
@@ -159,15 +135,15 @@ if st.sidebar.button("▶️ POBIERZ WSZYSTKIE WIADOMOŚCI"):
                 except:
                     pass
         return None
-    filtered["Score"] = filtered["Feedback"].map(parse_score)
+    df["Score"] = df["Feedback"].map(parse_score)
 
     st.header("📈 Podsumowanie zespołu")
-    st.metric("Średnia ocena", f"{filtered['Score'].mean():.2f}/5")
-    st.metric("Liczba wiadomości", len(filtered))
+    st.metric("Średnia ocena", f"{df['Score'].mean():.2f}/5")
+    st.metric("Liczba wiadomości", len(df))
 
     st.header("👤 Raport agentów")
     agg = (
-        filtered
+        df
         .groupby("Author")
         .agg(Średnia_ocena=("Score","mean"), Liczba=("Score","count"))
         .round(2)
@@ -176,5 +152,5 @@ if st.sidebar.button("▶️ POBIERZ WSZYSTKIE WIADOMOŚCI"):
     st.dataframe(agg, use_container_width=True)
 
     st.header("📥 Pobierz pełen raport")
-    csv = filtered.to_csv(index=False, sep=";").encode("utf-8")
+    csv = df.to_csv(index=False, sep=";").encode("utf-8")
     st.download_button("⬇️ CSV", data=csv, file_name="raport.csv", mime="text/csv")
