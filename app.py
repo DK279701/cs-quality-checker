@@ -24,61 +24,72 @@ until_dt = datetime.combine(end_date,   dtime.max)
 since_iso = since_dt.isoformat() + "Z"
 until_iso = until_dt.isoformat() + "Z"
 
-# ——— FETCH FRONT MESSAGES ————————————————————
+# ——— DEBUGOWANE POBIERANIE Z FRONT —————————————————
+def parse_front_date(ct):
+    try:
+        return datetime.fromisoformat(ct.replace("Z", "+00:00"))
+    except:
+        return None
+
 @st.cache_data(ttl=300)
-def fetch_front(token, inbox, since_dt, until_dt):
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept":        "application/json"
-    }
-    params = {
-        "inbox_id":  inbox,
-        "page_size": 100
-    }
+def fetch_front_debug(token, inbox, since_dt, until_dt):
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    params = {"inbox_id": inbox, "page_size": 100}
     url = "https://api2.frontapp.com/conversations"
-    convs = []
-    # paginacja po wszystkich konwersacjach
+
+    all_convs = []
+    debug = {"pages_fetched": 0, "total_convs": 0, "msgs_per_conv": {}}
+
+    # paginacja po konwersacjach
     while True:
-        r = requests.get(url, headers=headers, params={k: v for k, v in params.items() if v})
-        r.raise_for_status()
-        data = r.json()
-        convs.extend(data.get("_results", []))
+        resp = requests.get(url, headers=headers, params={k:v for k,v in params.items() if v})
+        resp.raise_for_status()
+        data = resp.json()
+        debug["pages_fetched"] += 1
+        convs = data.get("_results", [])
+        debug["total_convs"] += len(convs)
+        all_convs.extend(convs)
         cursor = data.get("_cursor")
         if not cursor:
             break
         params["cursor"] = cursor
 
     msgs = []
-    for c in convs:
-        r2 = requests.get(f"{url}/{c['id']}/messages", headers=headers)
+    for c in all_convs:
+        conv_id = c["id"]
+        r2 = requests.get(f"{url}/{conv_id}/messages", headers=headers)
         r2.raise_for_status()
-        for m in r2.json().get("_results", []):
+        conv_msgs = r2.json().get("_results", [])
+        debug["msgs_per_conv"][conv_id] = len(conv_msgs)
+        for m in conv_msgs:
             ct = m.get("created_at")
-            if not ct:
-                continue
-            try:
-                created = datetime.fromisoformat(ct.replace("Z", "+00:00"))
-            except:
-                continue
-            # teraz filtrujemy po datach
-            if since_dt <= created <= until_dt:
+            created = parse_front_date(ct) if ct else None
+            if created and since_dt <= created <= until_dt:
                 msgs.append({
-                    "Conversation ID": c["id"],
+                    "Conversation ID": conv_id,
                     "Message ID":      m["id"],
                     "Author":          m["author"]["handle"],
                     "Extract":         m["body"],
                     "Created At":      created
                 })
-    return pd.DataFrame(msgs)
+    return pd.DataFrame(msgs), debug
 
 # ——— POBIERANIE KONWERSACJI —————————————————————
-if not api_token:
-    st.sidebar.warning("🔑 Podaj Front API Token")
-    st.stop()
-
 if st.sidebar.button("▶️ Pobierz wiadomości"):
+    if not api_token:
+        st.sidebar.warning("🔑 Podaj Front API Token")
+        st.stop()
+
     with st.spinner("⏳ Pobieranie…"):
-        df = fetch_front(api_token, inbox_id or None, since_dt, until_dt)
+        df, debug = fetch_front_debug(api_token, inbox_id or None, since_dt, until_dt)
+
+    # Wyświetlamy debug info
+    with st.expander("🛠️ Debug info"):
+        st.write(f"• Stron konwersacji pobrano: **{debug['pages_fetched']}**")
+        st.write(f"• Łącznie konwersacji: **{debug['total_convs']}**")
+        sample = list(debug["msgs_per_conv"].items())[:10]
+        st.write("• Przykładowe konwersacje i liczba wiadomości:", sample)
+
     st.success(f"Pobrano {len(df)} wiadomości ({since_iso} ↔ {until_iso})")
     st.dataframe(df)
 
@@ -131,7 +142,7 @@ if st.sidebar.button("▶️ Pobierz wiadomości"):
             for i in range(0, len(recs), batch_size):
                 batch = recs[i : i + batch_size]
                 tasks = [analyze_one(sess, r) for r in batch]
-                res   = await asyncio.gather(*tasks)
+                res = await asyncio.gather(*tasks)
                 out.extend(res)
                 done = min(i + batch_size, len(recs))
                 progress.progress(done / len(recs))
