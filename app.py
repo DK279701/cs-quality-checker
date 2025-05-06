@@ -41,21 +41,22 @@ def fetch_all_messages(token, inbox):
     # 2) fetch messages for each conversation
     records = []
     for c in convs:
-        conv_id = c["id"]
+        conv_id = c.get("id")
         r2 = requests.get(f"{url}/{conv_id}/messages", headers=headers)
         r2.raise_for_status()
         for m in r2.json().get("_results", []):
-            ct = m.get("created_at")
-            # parsujemy timestamp na datetime
+            author = m.get("author", {}).get("handle", "Unknown")
+            body   = m.get("body", "")
+            ct_raw = m.get("created_at", "")
             try:
-                created = parse_date(ct) if ct else None
+                created = parse_date(ct_raw) if ct_raw else None
             except:
                 created = None
             records.append({
                 "Conversation ID": conv_id,
-                "Message ID":      m["id"],
-                "Author":          m["author"]["handle"],
-                "Extract":         m["body"],
+                "Message ID":      m.get("id", ""),
+                "Author":          author,
+                "Extract":         body,
                 "Created At":      created
             })
     return pd.DataFrame(records)
@@ -74,7 +75,6 @@ if st.sidebar.button("▶️ POBIERZ WSZYSTKIE WIADOMOŚCI"):
     start_date = st.sidebar.date_input("Start", value=min_date, min_value=min_date, max_value=max_date)
     end_date   = st.sidebar.date_input("Koniec", value=max_date, min_value=min_date, max_value=max_date)
 
-    # filtrujemy w DataFrame
     mask = df["Created At"].between(
         datetime.combine(start_date, datetime.min.time()),
         datetime.combine(end_date,   datetime.max.time())
@@ -117,9 +117,10 @@ if st.sidebar.button("▶️ POBIERZ WSZYSTKIE WIADOMOŚCI"):
             "temperature": 0.3,
             "max_tokens": 200
         }
-        async with session.post(API_URL, headers=HEADERS, json=payload) as resp:
-            js = await resp.json()
-            return js["choices"][0]["message"]["content"].strip()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(API_URL, headers=HEADERS, json=payload) as resp:
+                js = await resp.json()
+                return js["choices"][0]["message"]["content"].strip()
 
     async def run_all(recs, prog, stat):
         out = []
@@ -135,7 +136,6 @@ if st.sidebar.button("▶️ POBIERZ WSZYSTKIE WIADOMOŚCI"):
                 stat.text(f"Przetworzono: {done}/{len(recs)}")
         return out
 
-    # ——— URUCHOMIENIE ANALIZY ————————————————————
     recs = filtered.to_dict(orient="records")
     prog = st.progress(0.0)
     stat = st.empty()
@@ -148,8 +148,10 @@ if st.sidebar.button("▶️ POBIERZ WSZYSTKIE WIADOMOŚCI"):
     def parse_score(txt):
         for l in txt.splitlines():
             if l.lower().startswith("ocena"):
-                try: return float(l.split(":")[1].split("/")[0].strip())
-                except: pass
+                try:
+                    return float(l.split(":")[1].split("/")[0].strip())
+                except:
+                    pass
         return None
     filtered["Score"] = filtered["Feedback"].map(parse_score)
 
