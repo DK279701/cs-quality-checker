@@ -14,11 +14,11 @@ st.sidebar.header("🔗 Ustawienia Front API")
 api_token = st.sidebar.text_input("Front API Token", type="password")
 inbox_id   = st.sidebar.text_input("Inbox ID (opcjonalnie)")
 
-st.sidebar.header("📅 Zakres dat")
+st.sidebar.header("📅 Zakres dat (filtr po created_at)")
 start_date = st.sidebar.date_input("Start",  value=datetime.utcnow().date() - pd.Timedelta(days=7))
 end_date   = st.sidebar.date_input("Koniec", value=datetime.utcnow().date())
 
-# Zamiana na datetime z godzinami UTC
+# Konwersja do datetime
 since_dt = datetime.combine(start_date, dtime.min)
 until_dt = datetime.combine(end_date,   dtime.max)
 since_iso = since_dt.isoformat() + "Z"
@@ -38,7 +38,13 @@ def fetch_front_debug(token, inbox, since_dt, until_dt):
     url = "https://api2.frontapp.com/conversations"
 
     all_convs = []
-    debug = {"pages_fetched": 0, "total_convs": 0, "msgs_per_conv": {}}
+    debug = {
+        "pages_fetched": 0,
+        "total_convs": 0,
+        "msgs_per_conv": {},
+        "min_created": None,
+        "max_created": None
+    }
 
     # paginacja po konwersacjach
     while True:
@@ -64,14 +70,21 @@ def fetch_front_debug(token, inbox, since_dt, until_dt):
         for m in conv_msgs:
             ct = m.get("created_at")
             created = parse_front_date(ct) if ct else None
-            if created and since_dt <= created <= until_dt:
-                msgs.append({
-                    "Conversation ID": conv_id,
-                    "Message ID":      m["id"],
-                    "Author":          m["author"]["handle"],
-                    "Extract":         m["body"],
-                    "Created At":      created
-                })
+            if created:
+                # aktualizuj min/max
+                if debug["min_created"] is None or created < debug["min_created"]:
+                    debug["min_created"] = created
+                if debug["max_created"] is None or created > debug["max_created"]:
+                    debug["max_created"] = created
+                # filtr po zakresie
+                if since_dt <= created <= until_dt:
+                    msgs.append({
+                        "Conversation ID": conv_id,
+                        "Message ID":      m["id"],
+                        "Author":          m["author"]["handle"],
+                        "Extract":         m["body"],
+                        "Created At":      created
+                    })
     return pd.DataFrame(msgs), debug
 
 # ——— POBIERANIE KONWERSACJI —————————————————————
@@ -85,12 +98,14 @@ if st.sidebar.button("▶️ Pobierz wiadomości"):
 
     # Wyświetlamy debug info
     with st.expander("🛠️ Debug info"):
-        st.write(f"• Stron konwersacji pobrano: **{debug['pages_fetched']}**")
-        st.write(f"• Łącznie konwersacji: **{debug['total_convs']}**")
+        st.write(f"- Stron konwersacji pobrano: **{debug['pages_fetched']}**")
+        st.write(f"- Łącznie konwersacji: **{debug['total_convs']}**")
         sample = list(debug["msgs_per_conv"].items())[:10]
-        st.write("• Przykładowe konwersacje i liczba wiadomości:", sample)
+        st.write("Przykładowe konwersacje i liczba wiadomości:", sample)
+        st.write(f"- Najwcześniejsza data wiadomości: **{debug['min_created']}**")
+        st.write(f"- Najpóźniejsza data wiadomości: **{debug['max_created']}**")
 
-    st.success(f"Pobrano {len(df)} wiadomości ({since_iso} ↔ {until_iso})")
+    st.success(f"Pobrano {len(df)} wiadomości (z zakresu {since_iso} ↔ {until_iso})")
     st.dataframe(df)
 
     # ——— USTAWIENIA OPENAI ————————————————————
@@ -142,7 +157,7 @@ if st.sidebar.button("▶️ Pobierz wiadomości"):
             for i in range(0, len(recs), batch_size):
                 batch = recs[i : i + batch_size]
                 tasks = [analyze_one(sess, r) for r in batch]
-                res = await asyncio.gather(*tasks)
+                res   = await asyncio.gather(*tasks)
                 out.extend(res)
                 done = min(i + batch_size, len(recs))
                 progress.progress(done / len(recs))
