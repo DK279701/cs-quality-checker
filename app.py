@@ -5,6 +5,7 @@ import aiohttp
 import asyncio
 import time
 from datetime import datetime, time as dtime
+from dateutil.parser import parse as parse_date  # nowa metoda
 
 st.set_page_config(page_title="CS Quality Checker – Bookinghost", layout="wide")
 st.title("📥 Pobieranie i analiza wiadomości z Front")
@@ -27,7 +28,8 @@ until_iso = until_dt.isoformat() + "Z"
 # ——— DEBUGOWANE POBIERANIE Z FRONT —————————————————
 def parse_front_date(ct):
     try:
-        return datetime.fromisoformat(ct.replace("Z", "+00:00"))
+        # dateutil obsłuży zarówno "Z", jak i milisekundy
+        return parse_date(ct)
     except:
         return None
 
@@ -68,8 +70,8 @@ def fetch_front_debug(token, inbox, since_dt, until_dt):
         conv_msgs = r2.json().get("_results", [])
         debug["msgs_per_conv"][conv_id] = len(conv_msgs)
         for m in conv_msgs:
-            ct = m.get("created_at")
-            created = parse_front_date(ct) if ct else None
+            ct = m.get("created_at", "")
+            created = parse_front_date(ct)
             if created:
                 # aktualizuj min/max
                 if debug["min_created"] is None or created < debug["min_created"]:
@@ -101,11 +103,11 @@ if st.sidebar.button("▶️ Pobierz wiadomości"):
         st.write(f"- Stron konwersacji pobrano: **{debug['pages_fetched']}**")
         st.write(f"- Łącznie konwersacji: **{debug['total_convs']}**")
         sample = list(debug["msgs_per_conv"].items())[:10]
-        st.write("Przykładowe konwersacje i liczba wiadomości:", sample)
+        st.write("• Przykładowe konwersacje i liczba wiadomości:", sample)
         st.write(f"- Najwcześniejsza data wiadomości: **{debug['min_created']}**")
         st.write(f"- Najpóźniejsza data wiadomości: **{debug['max_created']}**")
 
-    st.success(f"Pobrano {len(df)} wiadomości (z zakresu {since_iso} ↔ {until_iso})")
+    st.success(f"Pobrano {len(df)} wiadomości (zakres {since_iso} ↔ {until_iso})")
     st.dataframe(df)
 
     # ——— USTAWIENIA OPENAI ————————————————————
