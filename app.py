@@ -14,7 +14,6 @@ st.title("📥 Pobieranie i analiza OUTBOUND wiadomości z Front")
 st.sidebar.header("🔑 Klucze API")
 front_token = st.sidebar.text_input("Front API Token", type="password")
 openai_key  = st.sidebar.text_input("OpenAI API Key",   type="password")
-
 if not front_token or not openai_key:
     st.sidebar.warning("Wprowadź oba klucze API (Front i OpenAI).")
     st.stop()
@@ -25,14 +24,29 @@ st.sidebar.markdown("**Wykorzystywane inboxy:**")
 for iid in INBOX_IDS:
     st.sidebar.write(f"- `{iid}`")
 
+# --- Pobierz dane konkretnego teammate'a i cache'uj ---
+@st.cache_data(ttl=3600)
+def get_teammate_info(token, teammate_id):
+    url = f"https://api2.frontapp.com/teammates/{teammate_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    data = resp.json()
+    return {
+        "username":   data.get("username", ""),
+        "first_name": data.get("first_name", ""),
+        "last_name":  data.get("last_name", "")
+    }
+
 # --- Funkcja pobierająca i filtrująca tylko outbound ---
 @st.cache_data(ttl=300)
 def fetch_outbound_messages(token, inbox_ids):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     base_url = "https://api2.frontapp.com/conversations"
     records = []
-    debug_auth = []
+    teammate_ids = set()
 
+    # 1) Zbierz surowe rekordy i referencje do teammateów
     for inbox in inbox_ids:
         params = {"inbox_id": inbox, "page_size": 100}
         while True:
@@ -44,27 +58,27 @@ def fetch_outbound_messages(token, inbox_ids):
                 r2 = requests.get(f"{base_url}/{cid}/messages", headers=headers)
                 r2.raise_for_status()
                 for m in r2.json().get("_results", []):
+                    # tylko outbound
                     if m.get("is_inbound", True):
                         continue
-
-                    # Strip HTML
+                    # strip HTML
                     raw_body = m.get("body", "")
                     text = BeautifulSoup(raw_body, "html.parser").get_text(separator="\n")
-
-                    # Extract author
-                    raw_author = m.get("author")
-                    if isinstance(raw_author, dict):
-                        author = raw_author.get("handle") or raw_author.get("name") or "Unknown"
+                    # author ref
+                    raw_author = m.get("author", {})
+                    if isinstance(raw_author, dict) and raw_author.get("id", "").startswith("tea_"):
+                        tid = raw_author["id"]
+                        teammate_ids.add(tid)
+                        author_ref = tid
                     else:
-                        author = str(raw_author) if raw_author else "Unknown"
-                    if author == "Unknown":
-                        debug_auth.append(raw_author)
-
+                        # fallback handle or string
+                        author_ref = (raw_author.get("handle") if isinstance(raw_author, dict)
+                                      else str(raw_author) if raw_author else "Unknown")
                     records.append({
-                        "Inbox ID":        inbox,
+                        "Inbox ID":       inbox,
                         "Conversation ID": cid,
                         "Message ID":      m.get("id", ""),
-                        "Author":          author,
+                        "__author_ref":    author_ref,
                         "Extract":         text
                     })
             cursor = js.get("_cursor")
@@ -72,27 +86,34 @@ def fetch_outbound_messages(token, inbox_ids):
                 break
             params["cursor"] = cursor
 
+    # 2) Pobierz dane teammate'ów
+    teammates = {tid: get_teammate_info(token, tid) for tid in teammate_ids}
+
+    # 3) Zbuduj ostateczny DF z pełnym Author
     df = pd.DataFrame(records)
-    df["_raw_author_debug"] = pd.Series(debug_auth + [None] * (len(df) - len(debug_auth)))
+    def resolve_author(ref):
+        if isinstance(ref, str) and ref.startswith("tea_"):
+            info = teammates.get(ref, {})
+            return f"{info.get('first_name','')} {info.get('last_name','')} ({info.get('username','')})"
+        return ref or "Unknown"
+
+    df["Author"] = df["__author_ref"].map(resolve_author)
+    df.drop(columns="__author_ref", inplace=True)
     return df
 
-# --- Main flow ---
+# --- Główny flow aplikacji ---
 if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
+    # 1) Pobranie i przetworzenie danych
     with st.spinner("⏳ Pobieranie wiadomości…"):
         df = fetch_outbound_messages(front_token, INBOX_IDS)
-
     if df.empty:
-        st.warning("❗ Nie znaleziono żadnych wiadomości outbound w wybranych inboxach.")
+        st.warning("❗ Nie znaleziono żadnych wiadomości outbound.")
         st.stop()
 
     st.success(f"Pobrano {len(df)} wiadomości outbound.")
     st.dataframe(df.head(10))
 
-    # Show raw-author debug
-    st.subheader("🔍 Surowe wartości author (debug)")
-    st.dataframe(df[["_raw_author_debug"]].dropna().head(10))
-
-    # --- Async GPT analysis setup ---
+    # 2) Konfiguracja GPT
     API_URL = "https://api.openai.com/v1/chat/completions"
     HEADERS = {"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"}
     SYSTEM_PROMPT = (
@@ -122,7 +143,6 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
                 js = await resp.json()
         except Exception as e:
             return f"❌ Network/API error: {e}"
-
         if "error" in js:
             return f"❌ API error: {js['error'].get('message','Unknown')}"
         choices = js.get("choices")
@@ -153,10 +173,9 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
     start    = time.time()
     with st.spinner("⚙️ Analiza…"):
         df["Feedback"] = asyncio.run(run_all(recs, progress, status))
-    elapsed = time.time() - start
-    st.success(f"✅ Analiza zakończona w {elapsed:.1f}s")
+    st.success(f"✅ Analiza zakończona w {time.time() - start:.1f}s")
 
-    # Parse scores
+    # 3) Parsowanie ocen
     def parse_score(txt):
         for l in txt.splitlines():
             if l.lower().startswith("ocena"):
@@ -168,7 +187,7 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
 
     df["Score"] = df["Feedback"].map(parse_score)
 
-    # --- Results / report ---
+    # 4) Wyniki i raport
     st.header("📈 Podsumowanie zespołu")
     st.metric("Średnia ocena", f"{df['Score'].mean():.2f}/5")
     st.metric("Liczba wiadomości", len(df))
@@ -176,8 +195,7 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
     st.header("👤 Raport agentów")
     agg = (
         df.groupby("Author")
-          .agg(Średnia_ocena=("Score", "mean"),
-               Liczba=("Score", "count"))
+          .agg(Średnia_ocena=("Score", "mean"), Liczba=("Score", "count"))
           .round(2)
           .reset_index()
     )
