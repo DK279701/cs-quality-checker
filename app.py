@@ -14,43 +14,49 @@ front_token = st.sidebar.text_input("Front API Token", type="password")
 openai_key  = st.sidebar.text_input("OpenAI API Key",   type="password")
 
 if not front_token or not openai_key:
-    st.sidebar.warning("Wprowadź oba klucze API, aby kontynuować.")
+    st.sidebar.warning("Wprowadź oba klucze API (Front i OpenAI).")
     st.stop()
 
 # --- STAŁE INBOXY ---
 INBOX_IDS = ["inb_a3xxy", "inb_d2uom", "inb_d2xee"]
-st.sidebar.markdown("**Inboxy:**")
+st.sidebar.markdown("**Wykorzystywane inboxy:**")
 for iid in INBOX_IDS:
     st.sidebar.write(f"- `{iid}`")
 
-# --- FUNKCJA POBIERANIA WSZYSTKICH WIADOMOŚCI ---
+# --- funkcja pobierająca i filtrująca tylko outbound ---
 @st.cache_data(ttl=300)
-def fetch_all_messages(token, inbox_ids):
+def fetch_outbound_messages(token, inbox_ids):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     base_url = "https://api2.frontapp.com/conversations"
     records = []
 
     for inbox in inbox_ids:
         params = {"inbox_id": inbox, "page_size": 100}
-        # paginacja po konwersacjach
+        # paginacja konwersacji
         while True:
             r = requests.get(base_url, headers=headers, params=params)
             r.raise_for_status()
             js = r.json()
-            for c in js.get("_results", []):
-                cid = c.get("id", "")
-                # pobieranie wiadomości
+            for conv in js.get("_results", []):
+                cid = conv.get("id", "")
+                # pobranie wiadomości
                 r2 = requests.get(f"{base_url}/{cid}/messages", headers=headers)
                 r2.raise_for_status()
                 for m in r2.json().get("_results", []):
-                    direction = m.get("direction", "")
+                    # tylko wiadomości outbound
+                    if m.get("is_inbound", True):
+                        continue
+                    # autor
                     raw = m.get("author")
-                    author = raw.get("handle") if isinstance(raw, dict) else (str(raw) if raw else "")
+                    if isinstance(raw, dict):
+                        author = raw.get("handle", "Unknown")
+                    else:
+                        author = str(raw) if raw else "Unknown"
+                    # rekord
                     records.append({
                         "Inbox ID":        inbox,
                         "Conversation ID": cid,
                         "Message ID":      m.get("id", ""),
-                        "Direction":       direction,
                         "Author":          author,
                         "Extract":         m.get("body", "")
                     })
@@ -61,32 +67,19 @@ def fetch_all_messages(token, inbox_ids):
 
     return pd.DataFrame(records)
 
-# --- GŁÓWNY PRZEBIEG ---
+# --- GŁÓWNY PRZEBIEG APLIKACJI ---
 if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
-    # 1) pobranie danych
     with st.spinner("⏳ Pobieranie wiadomości…"):
-        df = fetch_all_messages(front_token, INBOX_IDS)
+        df = fetch_outbound_messages(front_token, INBOX_IDS)
 
     if df.empty:
-        st.warning("‼️ Brak wiadomości w inboxach.")
+        st.warning("❗ Nie znaleziono żadnych wiadomości outbound w wybranych inboxach.")
         st.stop()
 
-    # 2) filtr tylko OUTBOUND
-    df["Direction"] = df["Direction"].fillna("").str.lower().str.strip()
-    df = df[df["Direction"] == "outbound"]
-    if df.empty:
-        st.warning("❗ Nie znaleziono żadnych wiadomości outbound.")
-        st.stop()
-
-    # 3) zabezpieczenie kolumny Author
-    if "Author" not in df.columns:
-        df["Author"] = "Unknown"
-    df["Author"] = df["Author"].fillna("Unknown")
-
-    st.success(f"Pobrano i wyfiltrowano {len(df)} wiadomości outbound.")
+    st.success(f"Pobrano {len(df)} wiadomości outbound.")
     st.dataframe(df.head(10))
 
-    # --- ASYNC ANALIZA GPT ---
+    # --- ASYNC ANALIZA PRZEZ GPT ---
     API_URL = "https://api.openai.com/v1/chat/completions"
     HEADERS = {"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"}
     SYSTEM_PROMPT = (
@@ -95,7 +88,7 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
         "• empatię i uprzejmość\n"
         "• poprawność językową\n"
         "• zgodność z procedurami\n"
-        "• ton (ciepły, profesjonalny)\n\n"
+        "• ton komunikacji\n\n"
         "Odpowiedz w formacie:\n"
         "Ocena: X/5\n"
         "Uzasadnienie: • punkt 1\n• punkt 2"
@@ -105,8 +98,8 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
         payload = {
             "model": "gpt-3.5-turbo",
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": rec["Extract"]}
+                {"role": "system",  "content": SYSTEM_PROMPT},
+                {"role": "user",    "content": rec["Extract"]}
             ],
             "temperature": 0.3,
             "max_tokens": 200
@@ -129,8 +122,7 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
                 status.text(f"Przetworzono: {done}/{len(recs)}")
         return out
 
-    # 4) uruchomienie analizy
-    recs = df.to_dict(orient="records")
+    recs     = df.to_dict(orient="records")
     progress = st.progress(0.0)
     status   = st.empty()
     start    = time.time()
@@ -139,7 +131,7 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
     elapsed = time.time() - start
     st.success(f"✅ Analiza zakończona w {elapsed:.1f}s")
 
-    # 5) parsowanie ocen
+    # parsowanie ocen
     def parse_score(txt):
         for l in txt.splitlines():
             if l.lower().startswith("ocena"):
@@ -151,9 +143,11 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
 
     df["Score"] = df["Feedback"].map(parse_score)
 
-    # 6) raport
-    st.header("📈 Średnia ocena")
-    st.metric("", f"{df['Score'].mean():.2f}/5")
+    # --- WYNIKI / RAPORT ---
+    st.header("📈 Podsumowanie zespołu")
+    st.metric("Średnia ocena", f"{df['Score'].mean():.2f}/5")
+    st.metric("Liczba wiadomości", len(df))
+
     st.header("👤 Raport agentów")
     agg = (
         df.groupby("Author")
