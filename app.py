@@ -1,150 +1,74 @@
 import streamlit as st
 import pandas as pd
 import requests
-import aiohttp
-import asyncio
-import time
 
-st.set_page_config(page_title="CS Quality Checker", layout="wide")
-st.title("📥 Pobieranie i analiza OUTBOUND wiadomości z Front")
+st.set_page_config(page_title="Debug Front Directions", layout="wide")
+st.title("🛠️ Debug: wszystkie kierunki wiadomości z Front")
 
-# ——— SIDEBAR: KLUCZE I WYBRANE INBOXY —————————————————
-st.sidebar.header("🔑 Klucze API")
-
+# ——— SIDEBAR: FRONT API & INBOXY —————————————————
 front_token = st.sidebar.text_input("Front API Token", type="password")
-openai_key  = st.sidebar.text_input("OpenAI API Key",   type="password")
-
-if not front_token or not openai_key:
-    st.sidebar.info("Wprowadź oba klucze API (Front i OpenAI), aby kontynuować.")
+if not front_token:
+    st.sidebar.warning("Wklej Front API Token")
     st.stop()
 
-# ——— TYLKO TE TRZY INBOXY ———————————————————————
+# twardo podajemy te trzy inboxy:
 INBOXES = {
-    "Customer Service":         "inb_a3xxy",
-    "Chat Airbnb - New":        "inb_d2uom",
-    "Chat Booking - New":       "inb_d2xee"
+    "Customer Service":   "inb_a3xxy",
+    "Chat Airbnb - New":  "inb_d2uom",
+    "Chat Booking - New": "inb_d2xee"
 }
-st.sidebar.markdown("**Wczytane inboxy:**")
+st.sidebar.markdown("**Inboxy:**")
 for name, iid in INBOXES.items():
     st.sidebar.write(f"- {name} (`{iid}`)")
 
 inbox_ids = list(INBOXES.values())
 
-# ——— POBIERANIE OUTBOUND WIADOMOŚCI —————————————————
+# ——— FETCH ALL MESSAGES (no filter) ———————————————
 @st.cache_data(ttl=300)
-def fetch_outbound_messages(token, inbox_ids):
+def fetch_all(token, inbox_ids):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    base_url = "https://api2.frontapp.com/conversations"
-    records = []
-
+    base = "https://api2.frontapp.com/conversations"
+    rows = []
     for inbox in inbox_ids:
+        # paginacja konwersacji
         params = {"inbox_id": inbox, "page_size": 100}
         convs = []
-        # paginacja konwersacji
         while True:
-            r = requests.get(base_url, headers=headers, params=params)
+            r = requests.get(base, headers=headers, params=params)
             r.raise_for_status()
-            data = r.json()
-            convs.extend(data.get("_results", []))
-            cursor = data.get("_cursor")
-            if not cursor:
+            js = r.json()
+            convs.extend(js.get("_results", []))
+            if not js.get("_cursor"):
                 break
-            params["cursor"] = cursor
-
-        # pobieranie outbound wiadomości
+            params["cursor"] = js["_cursor"]
+        # każda konwersacja → wiadomości
         for c in convs:
-            cid = c.get("id", "")
-            r2 = requests.get(f"{base_url}/{cid}/messages", headers=headers)
+            cid = c.get("id")
+            r2 = requests.get(f"{base}/{cid}/messages", headers=headers)
             r2.raise_for_status()
             for m in r2.json().get("_results", []):
-                if m.get("direction") != "outbound":
-                    continue
-                raw = m.get("author")
-                author = raw.get("handle") if isinstance(raw, dict) else (str(raw) if raw else "Unknown")
-                records.append({
+                rows.append({
                     "Inbox ID":        inbox,
                     "Conversation ID": cid,
-                    "Message ID":      m.get("id", ""),
-                    "Author":          author,
-                    "Extract":         m.get("body", "")
+                    "Message ID":      m.get("id",""),
+                    "Author":          (m.get("author") or {}).get("handle","<no author>") 
+                                       if isinstance(m.get("author"), dict)
+                                       else str(m.get("author")),
+                    "Direction":       m.get("direction"),
+                    "Body (excerpt)":  m.get("body","")[:100]
                 })
-    return pd.DataFrame(records)
+    return pd.DataFrame(rows)
 
-# ——— GŁÓWNY PRZEBIEG ————————————————————————
-if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
-    with st.spinner("⏳ Pobieranie wiadomości…"):
-        df = fetch_outbound_messages(front_token, inbox_ids)
+if st.button("▶️ Pobierz wszystkie wiadomości (bez filtrowania)"):
+    with st.spinner("⏳ Pobieram…"):
+        df = fetch_all(front_token, inbox_ids)
 
-    if df.empty:
-        st.warning("‼️ Nie znaleziono żadnych wiadomości OUTBOUND w wybranych inboxach.")
-        st.stop()
+    st.success(f"Pobrano {len(df)} wiadomości.")
+    st.subheader("Pierwsze 20 rekordów")
+    st.dataframe(df.head(20))
 
-    st.success(f"Pobrano {len(df)} wiadomości OUTBOUND z {len(inbox_ids)} inboxów.")
-    st.dataframe(df.head(10))
+    st.subheader("Unikalne wartości Direction i ich liczność")
+    counts = df["Direction"].value_counts(dropna=False).rename_axis("direction").reset_index(name="count")
+    st.table(counts)
 
-    # ——— ASYNC ANALIZA GPT —————————————————————
-    API_URL = "https://api.openai.com/v1/chat/completions"
-    HEADERS = {"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"}
-    SYSTEM_PROMPT = (
-        "Jesteś Menedżerem Customer Service w Bookinghost.\n"
-        "Oceń jakość tej wiadomości OUTBOUND w skali 1–5, weź pod uwagę:\n"
-        "• empatię\n• poprawność językową\n• zgodność z procedurami\n• ton"
-    )
-
-    async def analyze_one(session, rec):
-        payload = {
-            "model": "gpt-3.5-turbo",
-            "messages": [
-                {"role":"system","content":SYSTEM_PROMPT},
-                {"role":"user",  "content":rec["Extract"]}
-            ],
-            "temperature":0.3,
-            "max_tokens":200
-        }
-        async with session.post(API_URL, headers=HEADERS, json=payload) as resp:
-            js = await resp.json()
-            return js["choices"][0]["message"]["content"].strip()
-
-    async def run_all(recs, prog, stat):
-        out, batch = [], 20
-        async with aiohttp.ClientSession() as sess:
-            for i in range(0, len(recs), batch):
-                chunk = recs[i:i+batch]
-                res   = await asyncio.gather(*[analyze_one(sess, r) for r in chunk])
-                out.extend(res)
-                done = min(i+batch, len(recs))
-                prog.progress(done/len(recs)); stat.text(f"Przetworzono: {done}/{len(recs)}")
-        return out
-
-    recs = df.to_dict(orient="records")
-    prog = st.progress(0.0); stat = st.empty(); start=time.time()
-    with st.spinner("⚙️ Analiza…"):
-        df["Feedback"] = asyncio.run(run_all(recs, prog, stat))
-    elapsed = time.time() - start
-    st.success(f"✅ Analiza zakończona w {elapsed:.1f}s")
-
-    # ——— PODSUMOWANIE ——————————————————————
-    def parse_score(txt):
-        for l in txt.splitlines():
-            if l.lower().startswith("ocena"):
-                try: return float(l.split(":")[1].split("/")[0].strip())
-                except: pass
-        return None
-
-    df["Score"] = df["Feedback"].map(parse_score)
-
-    st.header("📈 Podsumowanie zespołu")
-    st.metric("Średnia ocena", f"{df['Score'].mean():.2f}/5")
-    st.metric("Liczba wiadomości", len(df))
-
-    st.header("👤 Raport agentów")
-    agg = df.groupby("Author").agg(Średnia=("Score","mean"), Liczba=("Score","count")).round(2).reset_index()
-    st.dataframe(agg, use_container_width=True)
-
-    st.header("📥 Pobierz raport CSV")
-    st.download_button(
-        "⬇️ Pobierz CSV",
-        df.to_csv(index=False, sep=";").encode("utf-8"),
-        "outbound_report.csv",
-        "text/csv"
-    )
+    st.stop()  # na teraz debug—we stop przed analizą
