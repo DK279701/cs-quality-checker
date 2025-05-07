@@ -46,7 +46,6 @@ def fetch_outbound_messages(token, inbox_ids):
     records = []
     teammate_ids = set()
 
-    # 1) Zbierz surowe rekordy i referencje do teammateów
     for inbox in inbox_ids:
         params = {"inbox_id": inbox, "page_size": 100}
         while True:
@@ -54,28 +53,24 @@ def fetch_outbound_messages(token, inbox_ids):
             r.raise_for_status()
             js = r.json()
             for conv in js.get("_results", []):
-                cid = conv.get("id", "")
+                cid = conv["id"]
                 r2 = requests.get(f"{base_url}/{cid}/messages", headers=headers)
                 r2.raise_for_status()
                 for m in r2.json().get("_results", []):
-                    # tylko outbound
                     if m.get("is_inbound", True):
                         continue
-                    # strip HTML
                     raw_body = m.get("body", "")
                     text = BeautifulSoup(raw_body, "html.parser").get_text(separator="\n")
-                    # author ref
                     raw_author = m.get("author", {})
                     if isinstance(raw_author, dict) and raw_author.get("id", "").startswith("tea_"):
                         tid = raw_author["id"]
                         teammate_ids.add(tid)
                         author_ref = tid
                     else:
-                        # fallback handle or string
                         author_ref = (raw_author.get("handle") if isinstance(raw_author, dict)
                                       else str(raw_author) if raw_author else "Unknown")
                     records.append({
-                        "Inbox ID":       inbox,
+                        "Inbox ID":        inbox,
                         "Conversation ID": cid,
                         "Message ID":      m.get("id", ""),
                         "__author_ref":    author_ref,
@@ -86,36 +81,45 @@ def fetch_outbound_messages(token, inbox_ids):
                 break
             params["cursor"] = cursor
 
-    # 2) Pobierz dane teammate'ów
     teammates = {tid: get_teammate_info(token, tid) for tid in teammate_ids}
 
-    # 3) Zbuduj ostateczny DF z pełnym Author
     df = pd.DataFrame(records)
     def resolve_author(ref):
         if isinstance(ref, str) and ref.startswith("tea_"):
             info = teammates.get(ref, {})
             return f"{info.get('first_name','')} {info.get('last_name','')} ({info.get('username','')})"
         return ref or "Unknown"
-
     df["Author"] = df["__author_ref"].map(resolve_author)
     df.drop(columns="__author_ref", inplace=True)
     return df
 
 # --- Główny flow aplikacji ---
 if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
-    # 1) Pobranie i przetworzenie danych
     with st.spinner("⏳ Pobieranie wiadomości…"):
         df = fetch_outbound_messages(front_token, INBOX_IDS)
+
     if df.empty:
         st.warning("❗ Nie znaleziono żadnych wiadomości outbound.")
         st.stop()
 
-    st.success(f"Pobrano {len(df)} wiadomości outbound.")
+    # --- Wybór autorów do wykluczenia ---
+    st.sidebar.header("🚫 Wyklucz autorów")
+    all_authors = sorted(df["Author"].unique())
+    exclude = st.sidebar.multiselect("Wybierz autorów do wykluczenia", all_authors)
+    if exclude:
+        df = df[~df["Author"].isin(exclude)]
+        st.info(f"Wykluczono {len(exclude)} autorów, pozostało {len(df)} wiadomości.")
+
+    if df.empty:
+        st.warning("❗ Po wykluczeniu autorów nie pozostały żadne wiadomości.")
+        st.stop()
+
+    st.success(f"Pobrano i przygotowano do analizy {len(df)} wiadomości.")
     st.dataframe(df.head(10))
 
-    # 2) Konfiguracja GPT
+    # --- Async GPT analysis ---
     API_URL = "https://api.openai.com/v1/chat/completions"
-    HEADERS = {"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"}
+    HEADERS  = {"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"}
     SYSTEM_PROMPT = (
         "Jesteś Menedżerem Customer Service w Bookinghost i oceniasz jakość wiadomości agentów "
         "w skali 1–5. Weź pod uwagę:\n"
@@ -155,14 +159,13 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
 
     async def run_all(recs, progress, status):
         out = []
-        batch_size = 20
+        batch = 20
         async with aiohttp.ClientSession() as sess:
-            for i in range(0, len(recs), batch_size):
-                batch = recs[i : i + batch_size]
-                tasks = [analyze_one(sess, r) for r in batch]
-                res = await asyncio.gather(*tasks)
+            for i in range(0, len(recs), batch):
+                chunk = recs[i : i + batch]
+                res   = await asyncio.gather(*[analyze_one(sess, r) for r in chunk])
                 out.extend(res)
-                done = min(i + batch_size, len(recs))
+                done = min(i + batch, len(recs))
                 progress.progress(done / len(recs))
                 status.text(f"Przetworzono: {done}/{len(recs)}")
         return out
@@ -175,7 +178,7 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
         df["Feedback"] = asyncio.run(run_all(recs, progress, status))
     st.success(f"✅ Analiza zakończona w {time.time() - start:.1f}s")
 
-    # 3) Parsowanie ocen
+    # --- Parsowanie ocen ---
     def parse_score(txt):
         for l in txt.splitlines():
             if l.lower().startswith("ocena"):
@@ -184,13 +187,12 @@ if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
                 except:
                     pass
         return None
-
     df["Score"] = df["Feedback"].map(parse_score)
 
-    # 4) Wyniki i raport
+    # --- Raport ---
     st.header("📈 Podsumowanie zespołu")
     st.metric("Średnia ocena", f"{df['Score'].mean():.2f}/5")
-    st.metric("Liczba wiadomości", len(df))
+    st.metric("Liczba analizowanych wiadomości", len(df))
 
     st.header("👤 Raport agentów")
     agg = (
