@@ -3,4 +3,4 @@ pandas
 requests
 aiohttp
 openai>=1.0.0
-beatifulsoup4
+beautifulsoup4
