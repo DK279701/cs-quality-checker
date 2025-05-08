@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="CS Quality Checker", layout="wide")
 st.title("📥 Analiza wiadomości wyłącznie wybranych agentów (ostatnie 7 dni)")
 
-# — Sidebar: klucze API —
+# --- Sidebar: klucze API ---
 st.sidebar.header("🔑 Klucze API")
 front_token = st.sidebar.text_input("Front API Token", type="password")
 openai_key  = st.sidebar.text_input("OpenAI API Key",   type="password")
@@ -18,14 +18,14 @@ if not front_token or not openai_key:
     st.sidebar.warning("Podaj oba klucze API (Front i OpenAI).")
     st.stop()
 
-# — Stałe inboxy —
+# --- Stałe inboxy ---
 INBOX_IDS = ["inb_a3xxy","inb_d2uom","inb_d2xee"]
 st.sidebar.markdown("**Analizowane inboxy:**")
 st.sidebar.write("- Customer Service (`inb_a3xxy`)")
 st.sidebar.write("- Chat Airbnb – New (`inb_d2uom`)")
 st.sidebar.write("- Chat Booking – New (`inb_d2xee`)")
 
-# — Dozwolone ID agentów —
+# --- Dozwolone ID agentów ---
 ALLOWED_IDS = {
     "tea_a2k46","tea_cj1ue","tea_cocnq","tea_cs6hi","tea_gs47r",
     "tea_h7x3r","tea_hjadz","tea_hm6zb","tea_hn7h3","tea_hn7iv",
@@ -36,12 +36,12 @@ ALLOWED_IDS = {
 now = datetime.utcnow()
 seven_days_ago = now - timedelta(days=7)
 
-@st.cache_data(ttl=300)
-def fetch_and_filter(token, inbox_ids, since_ts):
+def fetch_and_filter(token, inbox_ids, since_dt, progress_bar):
     headers = {"Authorization":f"Bearer {token}","Accept":"application/json"}
     base = "https://api2.frontapp.com/conversations"
     rows = []
     total_inboxes = len(inbox_ids)
+
     for idx, inbox in enumerate(inbox_ids, start=1):
         params = {"inbox_id":inbox,"page_size":100}
         while True:
@@ -56,20 +56,24 @@ def fetch_and_filter(token, inbox_ids, since_ts):
                     # 1) tylko outbound
                     if m.get("is_inbound", True):
                         continue
+
                     # 2) data utworzenia
-                    created = m.get("created_at")
-                    if not created:
+                    created_at = m.get("created_at")
+                    if not created_at:
                         continue
-                    created_dt = datetime.fromisoformat(created.replace("Z","+00:00"))
-                    if created_dt < since_ts:
+                    created_dt = pd.to_datetime(created_at, utc=True)
+                    if created_dt < since_dt:
                         continue
+
                     # 3) author_id i filtr
                     raw = m.get("author") or {}
                     author_id = raw.get("id") if isinstance(raw, dict) else None
                     if author_id not in ALLOWED_IDS:
                         continue
+
                     # 4) strip HTML
                     text = BeautifulSoup(m.get("body",""),"html.parser").get_text("\n")
+
                     # 5) czytelny Author
                     if isinstance(raw, dict):
                         name   = (raw.get("first_name","") + " " + raw.get("last_name","")).strip()
@@ -77,6 +81,7 @@ def fetch_and_filter(token, inbox_ids, since_ts):
                         author = f"{name} ({handle})" if handle else name
                     else:
                         author = str(raw)
+
                     rows.append({
                         "Inbox ID":        inbox,
                         "Created At":      created_dt,
@@ -90,28 +95,30 @@ def fetch_and_filter(token, inbox_ids, since_ts):
             if not cursor:
                 break
             params["cursor"] = cursor
-        # aktualizacja paska postępu po każdym inboxie
-        st.session_state._fetch_progress.progress(idx/total_inboxes)
+
+        # postęp pobierania inboxów
+        progress_bar.progress(idx/total_inboxes)
+
     return pd.DataFrame(rows)
 
-# inicjalizacja paska postępu do pobierania
-if "_fetch_progress" not in st.session_state:
-    st.session_state._fetch_progress = st.progress(0.0)
+# --- Inicjalizacja paska postępu pobierania ---
+fetch_prog = st.sidebar.progress(0.0)
 
 if st.button("▶️ Pobierz i analizuj (ostatnie 7 dni)"):
-    # krok 1: pobieranie + filtracja
-    df = fetch_and_filter(front_token, INBOX_IDS, seven_days_ago)
+    # 1) pobieranie i filtrowanie
+    df = fetch_and_filter(front_token, INBOX_IDS, seven_days_ago, fetch_prog)
     if df.empty:
         st.warning("❗ Brak outbound-owych wiadomości od wybranych agentów w ostatnich 7 dniach.")
         st.stop()
-    st.success(f"Pobrano {len(df)} wiadomości z ostatnich 7 dni.")
+
+    st.success(f"Pobrano {len(df)} wiadomości.")
     st.dataframe(df[["Created At","Author","Extract"]].head(10), use_container_width=True)
 
-    # krok 2: analiza przez GPT
+    # 2) przygotowanie do analizy GPT
     API_URL = "https://api.openai.com/v1/chat/completions"
     HEADERS = {"Authorization":f"Bearer {openai_key}","Content-Type":"application/json"}
     SYSTEM = (
-        "Jesteś Menedżerem CS w Bookinghost i oceniasz jakość agentów "
+        "Jesteś Menedżerem CS w Bookinghost i oceniasz jakość wiadomości agentów "
         "w skali 1–5 (empatia, poprawność, procedury, ton). "
         "Odpowiedz formatem:\nOcena: X/5\nUzasadnienie: • pkt1\n• pkt2"
     )
@@ -145,28 +152,40 @@ if st.button("▶️ Pobierz i analizuj (ostatnie 7 dni)"):
         return out
 
     recs = df.to_dict("records")
-    prog = st.progress(0.0); stat = st.empty(); start=time.time()
+    analyze_prog = st.progress(0.0)
+    analyze_stat = st.empty()
+    start = time.time()
+
     with st.spinner("⚙️ Analiza…"):
-        df["Feedback"] = asyncio.run(run_all(recs, prog, stat))
+        df["Feedback"] = asyncio.run(run_all(recs, analyze_prog, analyze_stat))
+
     st.success(f"✅ Analiza zakończona w {time.time()-start:.1f}s")
 
-    # krok 3: parsowanie ocen i raport
-    def parse_score(t):
-        for l in t.splitlines():
+    # 3) parsowanie ocen i raport
+    def parse_score(txt):
+        for l in txt.splitlines():
             if l.lower().startswith("ocena"):
-                try: return float(l.split(":")[1].split("/")[0])
-                except: pass
+                try:
+                    return float(l.split(":")[1].split("/")[0])
+                except:
+                    pass
         return None
 
     df["Score"] = df["Feedback"].map(parse_score)
+
     st.header("📈 Podsumowanie")
     st.metric("Średnia ocena", f"{df['Score'].mean():.2f}/5")
     st.metric("Liczba wiadomości", len(df))
 
     st.header("👤 Raport agentów")
-    rb = df.groupby("Author").agg(Średnia=("Score","mean"),Liczba=("Score","count")).round(2).reset_index()
-    st.dataframe(rb, use_container_width=True)
+    report = (
+        df.groupby("Author")
+          .agg(Średnia=("Score","mean"), Liczba=("Score","count"))
+          .round(2)
+          .reset_index()
+    )
+    st.dataframe(report, use_container_width=True)
 
     st.header("📥 Pobierz CSV")
-    csv = df.to_csv(index=False,sep=";").encode("utf-8")
-    st.download_button("⬇ CSV", csv, "report.csv","text/csv")
+    csv = df.to_csv(index=False, sep=";").encode("utf-8")
+    st.download_button("⬇️ CSV", data=csv, file_name="report.csv", mime="text/csv")
