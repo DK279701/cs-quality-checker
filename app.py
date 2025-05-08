@@ -1,36 +1,43 @@
 import streamlit as st
-import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-st.title("🚧 Debug: Pobierz pierwsze 20 wiadomości z 3 inboxów")
+st.title("🧪 Debug – wiadomości OUTBOUND z inboxów przez /conversations")
 
 token = st.text_input("Front API Token", type="password")
 if not token:
     st.stop()
 
-INBOX_IDS = ["inb_a3xxy","inb_d2uom","inb_d2xee"]
 headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-all_msgs = []
-for inbox in INBOX_IDS:
-    # Używamy endpointu /messages z parametrem direction=outbound
-    # zamiast ręcznego odpytywania conversations, to będzie najszybsze
-    url = "https://api2.frontapp.com/messages"
-    params = {
-        "inbox_id": inbox,
-        "direction": "outbound",
-        "page_size": 20
-    }
-    resp = requests.get(url, headers=headers, params=params)
-    if resp.status_code != 200:
-        st.error(f"❌ Błąd {resp.status_code} dla inbox `{inbox}`:\n{resp.text}")
-        continue
-    data = resp.json().get("_results", [])
-    st.write(f"**Inbox {inbox}** – znaleziono {len(data)} wiadomości:")
-    for m in data:
-        txt = BeautifulSoup(m.get("body",""), "html.parser").get_text().replace("\n"," ")
-        st.write(f"- `{m.get('id')}` · inbound={m.get('is_inbound')} · {txt[:80]}…")
-    all_msgs.extend(data)
+INBOX_IDS = ["inb_a3xxy", "inb_d2uom", "inb_d2xee"]
+all_messages = []
 
-st.write(f"— razem pobrano {len(all_msgs)} rekordów.")
+for inbox_id in INBOX_IDS:
+    st.markdown(f"### 📥 Inbox: `{inbox_id}`")
+
+    conv_url = f"https://api2.frontapp.com/inboxes/{inbox_id}/conversations"
+    conv_resp = requests.get(conv_url, headers=headers, params={"limit": 5})  # mało na test
+    if conv_resp.status_code != 200:
+        st.error(f"Błąd {conv_resp.status_code}: {conv_resp.text}")
+        continue
+
+    conversations = conv_resp.json().get("_results", [])
+    st.write(f"- znaleziono {len(conversations)} konwersacji")
+
+    for conv in conversations:
+        conv_id = conv["id"]
+        msg_url = f"https://api2.frontapp.com/conversations/{conv_id}/messages"
+        msg_resp = requests.get(msg_url, headers=headers)
+
+        if msg_resp.status_code != 200:
+            st.warning(f"Nie udało się pobrać wiadomości z {conv_id}")
+            continue
+
+        for msg in msg_resp.json().get("_results", []):
+            if not msg.get("is_inbound"):  # outbound only
+                body = BeautifulSoup(msg.get("body", ""), "html.parser").get_text()
+                st.write(f"🟢 {msg['id']} · {body[:100]}…")
+                all_messages.append(msg)
+
+st.success(f"✅ Razem znaleziono {len(all_messages)} outboundowych wiadomości.")
