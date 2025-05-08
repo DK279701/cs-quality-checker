@@ -1,37 +1,29 @@
 import streamlit as st
 import pandas as pd
 import requests
-import aiohttp
-import asyncio
-import time
 from bs4 import BeautifulSoup
+import asyncio
+import aiohttp
+import time
 
-# --- Konfiguracja strony ---
 st.set_page_config(page_title="CS Quality Checker", layout="wide")
-st.title("📥 Pobieranie i analiza OUTBOUND wiadomości z Front")
+st.title("💬 Raport agentów")
 
-# --- Sidebar: klucze API ---
-st.sidebar.header("🔑 Klucze API")
-front_token = st.sidebar.text_input("Front API Token", type="password")
-openai_key  = st.sidebar.text_input("OpenAI API Key",   type="password")
-if not front_token or not openai_key:
-    st.sidebar.warning("Podaj oba klucze API (Front i OpenAI).")
+# Wprowadzenie tokena i inbox ID
+token = st.sidebar.text_input("Front API Token", type="password")
+inbox_ids = st.sidebar.text_input("Inbox ID(s) (oddzielone przecinkami)", "")
+
+if not token or not inbox_ids:
+    st.warning("Podaj token i przynajmniej jeden Inbox ID, aby kontynuować.")
     st.stop()
 
-# --- Stałe inboxy ---
-INBOX_IDS = ["inb_a3xxy", "inb_d2uom", "inb_d2xee"]
-st.sidebar.markdown("**Inboxy:**")
-for iid in INBOX_IDS:
-    st.sidebar.write(f"- `{iid}`")
-
-# --- Pobranie i filtrowanie OUTBOUND wiadomości ---
 @st.cache_data(ttl=300)
 def fetch_outbound(token, inbox_ids):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     base = "https://api2.frontapp.com/conversations"
     rows = []
 
-    for inbox in inbox_ids:
+    for inbox in [i.strip() for i in inbox_ids.split(",") if i.strip()]:
         params = {"inbox_id": inbox, "page_size": 100}
         while True:
             r = requests.get(base, headers=headers, params=params)
@@ -44,15 +36,24 @@ def fetch_outbound(token, inbox_ids):
                 for m in r2.json().get("_results", []):
                     if m.get("is_inbound", True):
                         continue
+
                     # strip HTML
                     raw_body = m.get("body", "")
                     text = BeautifulSoup(raw_body, "html.parser").get_text(separator="\n")
-                    # extract author reference
+
+                    # poprawne wyciągnięcie autora
                     raw = m.get("author")
                     if isinstance(raw, dict):
-                        author_ref = raw.get("handle") or raw.get("id") or "Unknown"
+                        author_ref = (
+                            raw.get("handle") or
+                            raw.get("username") or
+                            raw.get("name") or
+                            raw.get("id") or
+                            "Unknown"
+                        )
                     else:
                         author_ref = str(raw) if raw else "Unknown"
+
                     rows.append({
                         "Inbox ID":        inbox,
                         "Conversation ID": cid,
@@ -67,99 +68,95 @@ def fetch_outbound(token, inbox_ids):
 
     return pd.DataFrame(rows)
 
-# --- Główny flow ---
-if st.button("▶️ Pobierz i analizuj OUTBOUND wiadomości"):
-    with st.spinner("⏳ Pobieranie…"):
-        df = fetch_outbound(front_token, INBOX_IDS)
+df = fetch_outbound(token, inbox_ids)
 
-    if df.empty:
-        st.warning("❗ Brak wiadomości outbound w wybranych inboxach.")
-        st.stop()
+# Unikalne wiadomości po Message ID
+df = df.drop_duplicates(subset=["Message ID"]).reset_index(drop=True)
 
-    # --- Wyklucz autorów ---
-    st.sidebar.header("🚫 Wyklucz autorów")
-    authors = sorted(df["Author"].unique())
-    exclude = st.sidebar.multiselect("Wybierz autorów do wykluczenia", options=authors)
-    if exclude:
-        df = df[~df["Author"].isin(exclude)].reset_index(drop=True)
-    if df.empty:
-        st.warning("❗ Po wykluczeniu autorów brak wiadomości do analizy.")
-        st.stop()
+# Wyświetlenie wiadomości
+st.subheader("📨 Wiadomości do analizy")
+st.dataframe(df[["Author", "Extract"]])
 
-    st.success(f"Analizuję {len(df)} wiadomości od {len(df['Author'].unique())} autorów.")
-    st.dataframe(df.head(10))
+# Ładowanie modelu
+openai_key = st.sidebar.text_input("OpenAI API Key", type="password")
+if not openai_key:
+    st.warning("Podaj swój OpenAI API Key.")
+    st.stop()
 
-    # --- Przygotowanie GPT ---
-    API_URL = "https://api.openai.com/v1/chat/completions"
-    HEADERS = {"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"}
-    SYSTEM_PROMPT = (
-        "Jesteś Menedżerem Customer Service w Bookinghost i oceniasz jakość wiadomości agentów "
-        "w skali 1–5. Weź pod uwagę:\n"
-        "• empatię i uprzejmość\n"
-        "• poprawność językową\n"
-        "• zgodność z procedurami\n"
-        "• ton komunikacji\n\n"
-        "Odpowiedz w formacie:\n"
-        "Ocena: X/5\n"
-        "Uzasadnienie: • punkt 1\n• punkt 2"
-    )
+import openai
+openai.api_key = openai_key
 
-    async def analyze_one(sess, rec):
-        payload = {
-            "model": "gpt-3.5-turbo",
-            "messages": [
-                {"role":"system", "content":SYSTEM_PROMPT},
-                {"role":"user",   "content":rec["Extract"]}
-            ],
-            "temperature":0.3,
-            "max_tokens":200
-        }
+# prompt
+prompt_template = """
+Zanalizuj poniższą wiadomość wysłaną przez agenta do klienta i oceń ją w skali 1–5, gdzie:
+- 5: wzorowa wiadomość – empatyczna, wyczerpująca, dopasowana do sytuacji
+- 4: bardzo dobra wiadomość, z drobnymi brakami
+- 3: przeciętna, poprawna, ale bez zaangażowania
+- 2: mało pomocna, z brakami w treści lub tonie
+- 1: nieakceptowalna – niegrzeczna, błędna lub pusta
+
+Zwróć tylko ocenę liczbową i bardzo krótki feedback (1 zdanie) – np. „Poprawna wiadomość, ale bez personalizacji.”
+
+Wiadomość:
+\"\"\"
+{message}
+\"\"\"
+"""
+
+async def analyze_one(session, row):
+    msg = row["Extract"]
+    prompt = prompt_template.format(message=msg)
+    try:
+        async with session.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {openai.api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+            },
+        ) as resp:
+            js = await resp.json()
+            return js["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return f"Błąd: {str(e)}"
+
+async def run_all(rows, progress, status):
+    async with aiohttp.ClientSession() as session:
+        results = []
+        total = len(rows)
+        for i, row in enumerate(rows):
+            res = await analyze_one(session, row)
+            results.append(res)
+            progress.progress((i + 1) / total)
+            status.text(f"Analizuję wiadomość {i + 1} z {total}...")
+        return results
+
+st.subheader("⚙️ Analiza wiadomości")
+
+if st.button("Rozpocznij analizę"):
+    with st.spinner("Analiza wiadomości w toku..."):
+        recs = df.to_dict("records")
+        progress = st.progress(0)
+        status = st.empty()
+        df["Feedback"] = asyncio.run(run_all(recs, progress, status))
+        st.success("Gotowe!")
+
+    # Grupowanie po autorze
+    st.subheader("👤 Raport agentów")
+    def extract_score(text):
         try:
-            async with sess.post(API_URL, headers=HEADERS, json=payload) as resp:
-                js = await resp.json()
-        except Exception as e:
-            return f"❌ API error: {e}"
-        if "error" in js:
-            return f"❌ API error: {js['error'].get('message','Unknown')}"
-        choices = js.get("choices")
-        if not choices:
-            return "❌ No choices in response"
-        content = choices[0].get("message",{}).get("content")
-        return content.strip() if content else "❌ Missing content"
+            return float(text.strip().split()[0].replace(",", "."))
+        except:
+            return None
 
-    async def run_all(recs, prog, stat):
-        out=[]; batch=20
-        async with aiohttp.ClientSession() as sess:
-            for i in range(0,len(recs),batch):
-                chunk=recs[i:i+batch]
-                res=await asyncio.gather(*[analyze_one(sess,r) for r in chunk])
-                out.extend(res)
-                done=min(i+batch,len(recs))
-                prog.progress(done/len(recs)); stat.text(f"Przetworzono: {done}/{len(recs)}")
-        return out
+    df["Score"] = df["Feedback"].apply(extract_score)
+    report = df.groupby("Author")["Score"].agg(["mean", "count"]).reset_index()
+    report.columns = ["Author", "Śr", "Cnt"]
+    st.dataframe(report)
 
-    recs = df.to_dict("records")
-    prog = st.progress(0.0); stat = st.empty(); start=time.time()
-    with st.spinner("⚙️ Analiza…"):
-        df["Feedback"] = asyncio.run(run_all(recs, prog, stat))
-    st.success(f"✅ Zakończono w {time.time()-start:.1f}s")
-
-    # --- Parsowanie ocen ---
-    def parse_score(t):
-        for l in t.splitlines():
-            if l.lower().startswith("ocena"):
-                try: return float(l.split(":")[1].split("/")[0].strip())
-                except: pass
-        return None
-    df["Score"] = df["Feedback"].map(parse_score)
-
-    # --- Raport ---
-    st.header("📈 Średnia ocena")
-    st.metric("", f"{df['Score'].mean():.2f}/5")
-    st.header("👤 Raport agentów")
-    agg = df.groupby("Author").agg(Śr=("Score","mean"),Cnt=("Score","count")).round(2).reset_index()
-    st.dataframe(agg, use_container_width=True)
-
-    st.header("📥 Pobierz CSV")
-    st.download_button("⬇ CSV", df.to_csv(index=False,sep=";").encode("utf-8"),
-                       "report.csv","text/csv")
+    st.subheader("📥 Pobierz CSV")
+    st.download_button("⬇️ CSV", df.to_csv(index=False), file_name="analiza_wiadomosci.csv", mime="text/csv")
