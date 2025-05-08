@@ -32,11 +32,14 @@ ALLOWED_IDS = {
     "tea_hnytz","tea_hnyvr","tea_97fh2"
 }
 
-# zakres czasowy: ostatnie 7 dni
+# --- Zakres czasowy: ostatnie 7 dni ---
 now = datetime.utcnow()
 seven_days_ago = now - timedelta(days=7)
 
 def fetch_and_filter(token, inbox_ids, since_dt, progress_bar):
+    # Zamiana daty na pandas.Timestamp z UTC
+    since_ts = pd.to_datetime(since_dt, utc=True)
+
     headers = {"Authorization":f"Bearer {token}","Accept":"application/json"}
     base = "https://api2.frontapp.com/conversations"
     rows = []
@@ -62,10 +65,10 @@ def fetch_and_filter(token, inbox_ids, since_dt, progress_bar):
                     if not created_at:
                         continue
                     created_dt = pd.to_datetime(created_at, utc=True)
-                    if created_dt < since_dt:
+                    if created_dt < since_ts:
                         continue
 
-                    # 3) author_id i filtr
+                    # 3) author_id i filtr po dozwolonych
                     raw = m.get("author") or {}
                     author_id = raw.get("id") if isinstance(raw, dict) else None
                     if author_id not in ALLOWED_IDS:
@@ -96,7 +99,7 @@ def fetch_and_filter(token, inbox_ids, since_dt, progress_bar):
                 break
             params["cursor"] = cursor
 
-        # postęp pobierania inboxów
+        # aktualizacja paska postępu pobierania
         progress_bar.progress(idx/total_inboxes)
 
     return pd.DataFrame(rows)
@@ -105,7 +108,7 @@ def fetch_and_filter(token, inbox_ids, since_dt, progress_bar):
 fetch_prog = st.sidebar.progress(0.0)
 
 if st.button("▶️ Pobierz i analizuj (ostatnie 7 dni)"):
-    # 1) pobieranie i filtrowanie
+    # 1) pobranie i filtrowanie
     df = fetch_and_filter(front_token, INBOX_IDS, seven_days_ago, fetch_prog)
     if df.empty:
         st.warning("❗ Brak outbound-owych wiadomości od wybranych agentów w ostatnich 7 dniach.")
@@ -126,8 +129,10 @@ if st.button("▶️ Pobierz i analizuj (ostatnie 7 dni)"):
     async def analyze_one(sess, rec):
         payload = {
             "model":"gpt-3.5-turbo",
-            "messages":[{"role":"system","content":SYSTEM},
-                        {"role":"user","content":rec["Extract"]}],
+            "messages":[
+                {"role":"system","content":SYSTEM},
+                {"role":"user",  "content":rec["Extract"]}
+            ],
             "temperature":0.3,"max_tokens":200
         }
         async with sess.post(API_URL, headers=HEADERS, json=payload) as r:
@@ -135,18 +140,19 @@ if st.button("▶️ Pobierz i analizuj (ostatnie 7 dni)"):
         if js.get("error"):
             return f"❌ {js['error']['message']}"
         ch = js.get("choices") or []
-        if not ch: return "❌ no choices"
+        if not ch:
+            return "❌ no choices"
         return ch[0]["message"]["content"].strip()
 
     async def run_all(recs, prog, stat):
         out=[]; batch=20
         async with aiohttp.ClientSession() as sess:
-            total=len(recs)
-            for i in range(0,total,batch):
-                chunk=recs[i:i+batch]
-                res=await asyncio.gather(*[analyze_one(sess,r) for r in chunk])
+            total = len(recs)
+            for i in range(0, total, batch):
+                chunk = recs[i:i+batch]
+                res = await asyncio.gather(*[analyze_one(sess, r) for r in chunk])
                 out.extend(res)
-                done=min(i+batch,total)
+                done = min(i+batch, total)
                 prog.progress(done/total)
                 stat.text(f"Przetworzono {done}/{total}")
         return out
@@ -181,11 +187,10 @@ if st.button("▶️ Pobierz i analizuj (ostatnie 7 dni)"):
     report = (
         df.groupby("Author")
           .agg(Średnia=("Score","mean"), Liczba=("Score","count"))
-          .round(2)
-          .reset_index()
+          .round(2).reset_index()
     )
     st.dataframe(report, use_container_width=True)
 
     st.header("📥 Pobierz CSV")
     csv = df.to_csv(index=False, sep=";").encode("utf-8")
-    st.download_button("⬇️ CSV", data=csv, file_name="report.csv", mime="text/csv")
+    st.download_button("⬇ CSV", data=csv, file_name="report.csv", mime="text/csv")
