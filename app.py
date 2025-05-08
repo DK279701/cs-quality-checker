@@ -5,11 +5,12 @@ import aiohttp
 import asyncio
 import time
 from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="CS Quality Checker", layout="wide")
-st.title("📥 Analiza wiadomości wyłącznie wybranych agentów")
+st.title("📥 Analiza wiadomości wyłącznie wybranych agentów (ostatnie 7 dni)")
 
-# — Sidebar keys —
+# — Sidebar: klucze API —
 st.sidebar.header("🔑 Klucze API")
 front_token = st.sidebar.text_input("Front API Token", type="password")
 openai_key  = st.sidebar.text_input("OpenAI API Key",   type="password")
@@ -19,7 +20,7 @@ if not front_token or not openai_key:
 
 # — Stałe inboxy —
 INBOX_IDS = ["inb_a3xxy","inb_d2uom","inb_d2xee"]
-st.sidebar.markdown("**Inboxy:**")
+st.sidebar.markdown("**Analizowane inboxy:**")
 st.sidebar.write("- Customer Service (`inb_a3xxy`)")
 st.sidebar.write("- Chat Airbnb – New (`inb_d2uom`)")
 st.sidebar.write("- Chat Booking – New (`inb_d2xee`)")
@@ -31,13 +32,17 @@ ALLOWED_IDS = {
     "tea_hnytz","tea_hnyvr","tea_97fh2"
 }
 
+# zakres czasowy: ostatnie 7 dni
+now = datetime.utcnow()
+seven_days_ago = now - timedelta(days=7)
+
 @st.cache_data(ttl=300)
-def fetch_and_filter(token, inbox_ids):
+def fetch_and_filter(token, inbox_ids, since_ts):
     headers = {"Authorization":f"Bearer {token}","Accept":"application/json"}
     base = "https://api2.frontapp.com/conversations"
     rows = []
-
-    for inbox in inbox_ids:
+    total_inboxes = len(inbox_ids)
+    for idx, inbox in enumerate(inbox_ids, start=1):
         params = {"inbox_id":inbox,"page_size":100}
         while True:
             resp = requests.get(base, headers=headers, params=params)
@@ -51,65 +56,74 @@ def fetch_and_filter(token, inbox_ids):
                     # 1) tylko outbound
                     if m.get("is_inbound", True):
                         continue
-
-                    # 2) wyciągnięcie author_id (może być None)
+                    # 2) data utworzenia
+                    created = m.get("created_at")
+                    if not created:
+                        continue
+                    created_dt = datetime.fromisoformat(created.replace("Z","+00:00"))
+                    if created_dt < since_ts:
+                        continue
+                    # 3) author_id i filtr
                     raw = m.get("author") or {}
                     author_id = raw.get("id") if isinstance(raw, dict) else None
-                    # **tutaj filtrujemy na 100% po ID**
                     if author_id not in ALLOWED_IDS:
                         continue
-
-                    # 3) stripping HTML
+                    # 4) strip HTML
                     text = BeautifulSoup(m.get("body",""),"html.parser").get_text("\n")
-
-                    # 4) czytelny Author
+                    # 5) czytelny Author
                     if isinstance(raw, dict):
                         name   = (raw.get("first_name","") + " " + raw.get("last_name","")).strip()
                         handle = raw.get("username") or raw.get("handle") or ""
                         author = f"{name} ({handle})" if handle else name
                     else:
                         author = str(raw)
-
                     rows.append({
                         "Inbox ID":        inbox,
+                        "Created At":      created_dt,
                         "Conversation ID": cid,
                         "Message ID":      m.get("id",""),
                         "Author ID":       author_id,
                         "Author":          author,
                         "Extract":         text
                     })
-
             cursor = js.get("_cursor")
             if not cursor:
                 break
             params["cursor"] = cursor
-
+        # aktualizacja paska postępu po każdym inboxie
+        st.session_state._fetch_progress.progress(idx/total_inboxes)
     return pd.DataFrame(rows)
 
-if st.button("▶️ Pobierz i analizuj wybranych agentów"):
-    df = fetch_and_filter(front_token, INBOX_IDS)
+# inicjalizacja paska postępu do pobierania
+if "_fetch_progress" not in st.session_state:
+    st.session_state._fetch_progress = st.progress(0.0)
+
+if st.button("▶️ Pobierz i analizuj (ostatnie 7 dni)"):
+    # krok 1: pobieranie + filtracja
+    df = fetch_and_filter(front_token, INBOX_IDS, seven_days_ago)
     if df.empty:
-        st.warning("❗ Brak wiadomości od wskazanych agentów.")
+        st.warning("❗ Brak outbound-owych wiadomości od wybranych agentów w ostatnich 7 dniach.")
         st.stop()
+    st.success(f"Pobrano {len(df)} wiadomości z ostatnich 7 dni.")
+    st.dataframe(df[["Created At","Author","Extract"]].head(10), use_container_width=True)
 
-    st.success(f"Pobrano {len(df)} wiadomości od {df['Author'].nunique()} agentów.")
-    st.dataframe(df[["Author","Extract"]].head(10), use_container_width=True)
-
-    # — GPT ANALIZA —
+    # krok 2: analiza przez GPT
     API_URL = "https://api.openai.com/v1/chat/completions"
     HEADERS = {"Authorization":f"Bearer {openai_key}","Content-Type":"application/json"}
     SYSTEM = (
-      "Jesteś Menedżerem CS w Bookinghost, oceniasz wiadomość w skali 1–5:\n"
-      "empatia, poprawność, procedury, ton\n"
-      "Odpowiedz: Ocena: X/5\nUzasadnienie: • pkt1\n• pkt2"
+        "Jesteś Menedżerem CS w Bookinghost i oceniasz jakość agentów "
+        "w skali 1–5 (empatia, poprawność, procedury, ton). "
+        "Odpowiedz formatem:\nOcena: X/5\nUzasadnienie: • pkt1\n• pkt2"
     )
 
-    async def analyze(session, rec):
-        payload = {"model":"gpt-3.5-turbo","messages":[
-            {"role":"system","content":SYSTEM},
-            {"role":"user","content":rec["Extract"]}
-        ],"temperature":0.3,"max_tokens":200}
-        async with session.post(API_URL, headers=HEADERS, json=payload) as r:
+    async def analyze_one(sess, rec):
+        payload = {
+            "model":"gpt-3.5-turbo",
+            "messages":[{"role":"system","content":SYSTEM},
+                        {"role":"user","content":rec["Extract"]}],
+            "temperature":0.3,"max_tokens":200
+        }
+        async with sess.post(API_URL, headers=HEADERS, json=payload) as r:
             js = await r.json()
         if js.get("error"):
             return f"❌ {js['error']['message']}"
@@ -120,32 +134,31 @@ if st.button("▶️ Pobierz i analizuj wybranych agentów"):
     async def run_all(recs, prog, stat):
         out=[]; batch=20
         async with aiohttp.ClientSession() as sess:
-            for i in range(0,len(recs),batch):
-                batch_recs=recs[i:i+batch]
-                res = await asyncio.gather(*[analyze(sess,r) for r in batch_recs])
+            total=len(recs)
+            for i in range(0,total,batch):
+                chunk=recs[i:i+batch]
+                res=await asyncio.gather(*[analyze_one(sess,r) for r in chunk])
                 out.extend(res)
-                done=min(i+batch,len(recs))
-                prog.progress(done/len(recs))
-                stat.text(f"Przetworzono {done}/{len(recs)}")
+                done=min(i+batch,total)
+                prog.progress(done/total)
+                stat.text(f"Przetworzono {done}/{total}")
         return out
 
     recs = df.to_dict("records")
     prog = st.progress(0.0); stat = st.empty(); start=time.time()
     with st.spinner("⚙️ Analiza…"):
         df["Feedback"] = asyncio.run(run_all(recs, prog, stat))
-    st.success(f"✅ Zakończono w {time.time()-start:.1f}s")
+    st.success(f"✅ Analiza zakończona w {time.time()-start:.1f}s")
 
-    def parse_score(txt):
-        for l in txt.splitlines():
+    # krok 3: parsowanie ocen i raport
+    def parse_score(t):
+        for l in t.splitlines():
             if l.lower().startswith("ocena"):
-                try:
-                    return float(l.split(":")[1].split("/")[0])
-                except:
-                    pass
+                try: return float(l.split(":")[1].split("/")[0])
+                except: pass
         return None
 
     df["Score"] = df["Feedback"].map(parse_score)
-
     st.header("📈 Podsumowanie")
     st.metric("Średnia ocena", f"{df['Score'].mean():.2f}/5")
     st.metric("Liczba wiadomości", len(df))
@@ -156,4 +169,4 @@ if st.button("▶️ Pobierz i analizuj wybranych agentów"):
 
     st.header("📥 Pobierz CSV")
     csv = df.to_csv(index=False,sep=";").encode("utf-8")
-    st.download_button("⬇️ CSV",csv,"report.csv","text/csv")
+    st.download_button("⬇ CSV", csv, "report.csv","text/csv")
