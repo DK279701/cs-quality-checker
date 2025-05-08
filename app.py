@@ -1,7 +1,7 @@
 import requests
 
 # Zamień poniżej na swój token API Front
-FRONT_API_TOKEN = "YOUR_FRONT_API_TOKEN"
+FRONT_API_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzY29wZXMiOlsicHJvdmlzaW9uaW5nIiwic2hhcmVkOioiLCJrYiIsInRpbTo3Nzg3Nzk4Il0sImlhdCI6MTc0NjQ4MDM1MSwiaXNzIjoiZnJvbnQiLCJzdWIiOiI1MWUzNzMwNGU4YTgyODgzY2I1MiIsImp0aSI6ImJjMTMzZTlhNjc2ZGU5ZDgifQ.RwQiWDwXsyYglL0xNsSaWh5y2G5Sd-GfZoLs263YYSc"
 
 headers = {
     "Authorization": f"Bearer {FRONT_API_TOKEN}",
